@@ -1,0 +1,14 @@
+# Unredacted server notes and test output (never commit)
+/local/
+*.log
+
+# Dependencies and build output
+/vendor/
+/dist/
+/composer.lock
+/.phpunit.result.cache
+/.phpunit.cache/
+
+# Local dev harness state
+/dev/var/
+/dev/vhosts/
