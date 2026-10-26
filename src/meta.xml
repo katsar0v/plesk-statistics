@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<module>
+    <id>live-traffic-monitor</id>
+    <name>Live Traffic Monitor</name>
+    <description>Near real-time view of the HTTP requests reaching every website on this server, read from the nginx and Apache access logs. Administrators only.</description>
+    <category>monitoring</category>
+    <url>https://github.com/katsar0v/plesk-statistics</url>
+    <support_url>https://github.com/katsar0v/plesk-statistics/issues</support_url>
+    <version>1.0.0</version>
+    <release>1</release>
+    <vendor>Kristiyan Katsarov</vendor>
+    <plesk_min_version>18.0.50</plesk_min_version>
+    <os>unix</os>
+</module>

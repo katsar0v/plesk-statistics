@@ -1,0 +1,14 @@
+parameters:
+    level: 5
+    paths:
+        - src/plib
+    excludePaths:
+        - src/plib/views
+    scanDirectories:
+        - vendor/plesk/pm-api-stubs/pm
+        - vendor/plesk/zf1/library
+    ignoreErrors:
+        # Zend_View and the action helper broker resolve helpers and view variables through magic methods.
+        - '#^Call to an undefined method Zend_View_Interface::head(Link|Script)\(\)\.$#'
+        - '#^Access to an undefined property Zend_View_Interface::\$(pageTitle|config)\.$#'
+        - '#^Call to an undefined method Zend_Controller_Action_HelperBroker::json\(\)\.$#'
