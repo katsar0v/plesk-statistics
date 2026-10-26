@@ -196,13 +196,14 @@ if ($path === '/') {
             return results;
         };
     </script>
+    <!-- Plesk adds headScript() files here, before the page body. -->
+    <script src="/js/monitor.js"></script>
 </head>
 <body>
     <div class="dev-header"><h1>Live Traffic Monitor</h1></div>
     <div class="dev-content">
 <?php echo $body; ?>
     </div>
-    <script src="/js/monitor.js"></script>
 </body>
 </html>
 <?php
