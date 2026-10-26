@@ -1,0 +1,115 @@
+<?php
+/**
+ * Dashboard body. Plesk's admin layout provides the page title; htdocs/js/monitor.js fills in the rest.
+ *
+ * @var Zend_View $this
+ * @var array<string, mixed> $this->config see docs/data-contract.md ("Page config")
+ */
+?>
+<div id="ltm-app" class="ltm" data-config="<?php echo $this->escape(json_encode($this->config)); ?>">
+    <noscript>
+        <p class="ltm-alert ltm-alert--error">JavaScript is required to show live traffic. Enable it in your browser and reload this page.</p>
+    </noscript>
+
+    <p class="ltm-notice" role="note">These are HTTP requests seen by the web servers (nginx and Apache), not unique visitors or page views. Client-side navigation in single-page apps and responses served from a CDN cache never reach the server, so they do not appear here. Sensitive query parameters and tokens are redacted.</p>
+
+    <div class="ltm-toolbar">
+        <div class="ltm-field">
+            <span class="ltm-field-label" id="ltm-window-label">Time window</span>
+            <div class="ltm-segmented" id="ltm-window" role="group" aria-labelledby="ltm-window-label"></div>
+        </div>
+        <div class="ltm-field">
+            <label class="ltm-field-label" for="ltm-domain">Website</label>
+            <select class="ltm-select" id="ltm-domain"></select>
+        </div>
+        <div class="ltm-field">
+            <button type="button" class="ltm-btn" id="ltm-pause">Pause</button>
+        </div>
+        <div class="ltm-status" id="ltm-status" role="status" data-state="loading">
+            <span class="ltm-dot" aria-hidden="true"></span>
+            <span id="ltm-status-text">Loading…</span>
+        </div>
+    </div>
+
+    <div class="ltm-alert ltm-alert--error" id="ltm-error" role="alert" hidden></div>
+
+    <div class="ltm-content" id="ltm-content">
+        <div class="ltm-summary">
+            <div class="ltm-card" data-stat="total">
+                <div class="ltm-card-label">Requests in window</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+            <div class="ltm-card" data-stat="rps">
+                <div class="ltm-card-label">Requests per second</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+            <div class="ltm-card ltm-card--2xx" data-stat="2xx">
+                <div class="ltm-card-label">2xx Success</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+            <div class="ltm-card ltm-card--3xx" data-stat="3xx">
+                <div class="ltm-card-label">3xx Redirect</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+            <div class="ltm-card ltm-card--4xx" data-stat="4xx">
+                <div class="ltm-card-label">4xx Client error</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+            <div class="ltm-card ltm-card--5xx" data-stat="5xx">
+                <div class="ltm-card-label">5xx Server error</div>
+                <div class="ltm-card-value">–</div>
+                <div class="ltm-card-sub"></div>
+            </div>
+        </div>
+
+        <div class="ltm-grid">
+            <section class="ltm-panel">
+                <h2 class="ltm-heading">By website</h2>
+                <div class="ltm-scroll ltm-scroll--short">
+                    <table class="ltm-table ltm-table--sites">
+                        <thead>
+                            <tr>
+                                <th scope="col">Website</th>
+                                <th scope="col" class="ltm-num">Requests</th>
+                                <th scope="col">Share</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ltm-sites"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="ltm-panel">
+                <h2 class="ltm-heading">Top statuses</h2>
+                <ul class="ltm-statuses" id="ltm-statuses"></ul>
+            </section>
+        </div>
+
+        <section class="ltm-panel">
+            <h2 class="ltm-heading">Requests <span class="ltm-heading-note">newest first</span></h2>
+            <div class="ltm-scroll ltm-scroll--tall" role="region" aria-label="Requests" tabindex="0">
+                <table class="ltm-table ltm-table--requests">
+                    <thead>
+                        <tr>
+                            <th scope="col">Time</th>
+                            <th scope="col">Website</th>
+                            <th scope="col">Method</th>
+                            <th scope="col">URL</th>
+                            <th scope="col">Status</th>
+                            <th scope="col">IP</th>
+                            <th scope="col" class="ltm-num">Time taken</th>
+                            <th scope="col" class="ltm-num">Size</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ltm-requests"></tbody>
+                </table>
+            </div>
+            <p class="ltm-footer" id="ltm-footer"></p>
+        </section>
+    </div>
+</div>
