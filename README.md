@@ -5,6 +5,10 @@
 A Plesk Obsidian extension that adds a **Live Traffic** page for server administrators. The page
 shows the HTTP requests reaching every website on the server, nearly in real time.
 
+![The Live Traffic page in Plesk, with summary cards, a breakdown by website and status, and the newest requests](docs/screenshot.png)
+
+<sub>The screenshot shows dummy websites and IP addresses from the documentation ranges.</sub>
+
 - **Time windows:** the last 1, 2 or 5 minutes, refreshed every 3 seconds without reloading the page.
 - **Summary:** requests per second, plus a breakdown by website and by status. Click a website to
   filter by it.
