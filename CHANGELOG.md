@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0 – 2026-10-29
+
+- **Docker containers.** Requests to websites behind a Docker proxy rule are tagged with the container that answered them. They were already counted through nginx's logs; now the dashboard says which container served them.
+- **Containers panel** with each container's state and health from Docker, its image, websites, requests and 5xx errors. A stopped container shows as "Exited", with nginx's 502 answers counted against it.
+- **Filter by container**, from the panel or the filter menu, next to the filter by website.
+- The rules come from the Docker extension's database, read-only, and the containers from Docker's API on the local socket. The panel user is already in the `docker` group, so nothing runs as root. Container logs are not read.
+
 ## 1.0.0 – 2026-10-26
 
 First release: a **Live Traffic** page for Plesk administrators that shows the HTTP requests to all hosted websites in near real time.
