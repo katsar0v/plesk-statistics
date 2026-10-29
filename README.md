@@ -1,6 +1,6 @@
 # Live Traffic Monitor for Plesk
 
-**Version 1.0.0** · Plesk Obsidian 18.0.50+ on Linux · [Changelog](CHANGELOG.md)
+**Version 1.1.0** · Plesk Obsidian 18.0.50+ on Linux · [Changelog](CHANGELOG.md)
 
 A Plesk Obsidian extension that adds a **Live Traffic** page for server administrators. The page
 shows the HTTP requests reaching every website on the server, nearly in real time.
@@ -14,6 +14,9 @@ shows the HTTP requests reaching every website on the server, nearly in real tim
   filter by it.
 - **Request list:** the newest requests first, with time, website, method, URL, status, IP address,
   response size and response time (when the log format records it).
+- **Docker containers:** requests to websites behind a Docker proxy rule show the container that
+  answered them. A panel lists each container with its state, health, requests and 5xx errors.
+  Click a container to filter by it.
 - **Secrets hidden:** tokens, passwords, e-mail addresses and other secrets in URLs are replaced
   with `[redacted]`.
 
@@ -42,6 +45,21 @@ subdomains, in `/var/www/vhosts/system/<domain>/logs/`:
 - So the counts are right for nginx-only sites, nginx + Apache sites, Docker proxy sites and
   Apache-only servers alike.
 
+**Docker containers.**
+- A website with a Docker proxy rule (Websites & Domains → Docker Proxy Rules) is served by Plesk's
+  nginx, which passes the requests to a port that a container publishes on the host. nginx logs
+  these requests in the website's own log, so they are counted like any other. Container logs are
+  never read.
+- To name the container, the extension reads the rules (website, URL path, host port) from the
+  Docker extension's database, `/usr/local/psa/var/modules/docker/db.sqlite3`, opened read-only. It
+  then asks Docker which container publishes that port. A stopped container lists no ports, so its
+  configuration is checked instead.
+- A request is credited to the rule with the longest matching URL path. Requests nginx answers
+  itself are not: plain-HTTP requests to a website that redirects to HTTPS, certificate
+  validation (`/.well-known/acme-challenge/`, `/.well-known/pki-validation/`) and invalid requests.
+- The state and health come from Docker each time the page refreshes. A container that has stopped
+  shows as "Exited", and nginx's 502 answers for it count as its 5xx errors.
+
 **Logs are read incrementally.**
 - Each poll reads only the bytes added since the previous one and keeps the parsed requests for 10
   minutes in a small SQLite database (`/usr/local/psa/var/modules/live-traffic-monitor/state/`).
@@ -60,6 +78,10 @@ the extension starts over at the right point in time.
   administrators logged in as a customer get "Permission denied".
 - The extension runs as Plesk's panel user `psaadm`, which can already read the logs. It changes no
   permissions and runs nothing as root.
+- `psaadm` is in the `docker` group, which Plesk's Docker extension relies on, so the extension can
+  ask Docker directly over `/var/run/docker.sock`. It only sends `GET` requests for the list of
+  containers and the configuration of stopped ones. From the Docker extension's database it reads
+  the proxy rules and the socket setting, never the stored TLS keys.
 - URLs are redacted before they are stored:
   - query parameters whose names suggest credentials or personal data (`token`, `key`, `password`,
     `session`, `code`, `state`, `email`, `_wpnonce`, `X-Amz-Signature`, …);
@@ -74,7 +96,7 @@ You need root access to the server:
 
 ```sh
 curl -fsSLo /tmp/live-traffic-monitor.zip \
-  https://github.com/katsar0v/plesk-statistics/releases/download/v1.0.0/live-traffic-monitor-1.0.0-1.zip
+  https://github.com/katsar0v/plesk-statistics/releases/download/v1.1.0/live-traffic-monitor-1.1.0-1.zip
 plesk bin extension --install /tmp/live-traffic-monitor.zip     # use --upgrade for a newer version
 rm /tmp/live-traffic-monitor.zip
 ```
@@ -90,6 +112,10 @@ Tools & Settings. To remove it: `plesk bin extension --uninstall live-traffic-mo
   column shows "—".
 - **Duplicate detection** relies on Apache logging the real client IP. Plesk does this by default
   with `mod_remoteip`.
+- **Docker rules on a remote Docker host** are shown by their target address, with the state
+  "Unknown". Only the local Docker is asked.
+- **Overlapping Docker rules** of one website are matched by the longest URL path. nginx's own
+  order of regular-expression locations is not reproduced.
 
 ## Development
 

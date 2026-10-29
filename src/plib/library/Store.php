@@ -4,7 +4,7 @@
  */
 class Modules_LiveTrafficMonitor_Store
 {
-    private const SCHEMA_VERSION = 1;
+    private const SCHEMA_VERSION = 2;
 
     /**
      * An Apache line is a copy of an nginx line when Plesk's nginx served a static file on Apache's
@@ -59,9 +59,11 @@ class Modules_LiveTrafficMonitor_Store
         $this->db->exec('CREATE TABLE requests (
             id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, domain TEXT NOT NULL, scheme TEXT NOT NULL,
             src TEXT NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL, status INTEGER NOT NULL,
-            bytes INTEGER NOT NULL, ip TEXT NOT NULL, rt REAL, k INTEGER NOT NULL, dup INTEGER NOT NULL DEFAULT 0)');
+            bytes INTEGER NOT NULL, ip TEXT NOT NULL, rt REAL, container TEXT, k INTEGER NOT NULL,
+            dup INTEGER NOT NULL DEFAULT 0)');
         $this->db->exec('CREATE INDEX requests_ts ON requests (ts)');
         $this->db->exec('CREATE INDEX requests_domain_ts ON requests (domain, ts)');
+        $this->db->exec('CREATE INDEX requests_container_ts ON requests (container, ts)');
         $this->db->exec('CREATE INDEX requests_k_ts ON requests (k, ts)');
         $this->db->exec('CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)');
         $this->db->exec('PRAGMA user_version = ' . self::SCHEMA_VERSION);
@@ -118,14 +120,14 @@ class Modules_LiveTrafficMonitor_Store
         $stmt->execute();
     }
 
-    /** @param list<array<string, int|float|string|null>> $rows named parameters `:ts`, `:domain`, `:scheme`, `:src`, `:method`, `:path`, `:status`, `:bytes`, `:ip`, `:rt`, `:k` */
+    /** @param list<array<string, int|float|string|null>> $rows named parameters `:ts`, `:domain`, `:scheme`, `:src`, `:method`, `:path`, `:status`, `:bytes`, `:ip`, `:rt`, `:container`, `:k` */
     public function insertRequests(array $rows): void
     {
         if (!$rows) {
             return;
         }
-        $stmt = $this->db->prepare('INSERT INTO requests (ts, domain, scheme, src, method, path, status, bytes, ip, rt, k)
-            VALUES (:ts, :domain, :scheme, :src, :method, :path, :status, :bytes, :ip, :rt, :k)');
+        $stmt = $this->db->prepare('INSERT INTO requests (ts, domain, scheme, src, method, path, status, bytes, ip, rt, container, k)
+            VALUES (:ts, :domain, :scheme, :src, :method, :path, :status, :bytes, :ip, :rt, :container, :k)');
         foreach ($rows as $row) {
             $stmt->execute($row);
         }
@@ -169,9 +171,10 @@ class Modules_LiveTrafficMonitor_Store
      * Requests with `$now - $window < ts <= $now`, Apache duplicates excluded.
      *
      * @return array{total: int, byStatusClass: array<string, int>, byStatus: list<array{status: int, count: int}>,
-     *               byDomain: list<array{domain: string, count: int}>, rows: list<array<string, mixed>>}
+     *               byDomain: list<array{domain: string, count: int}>,
+     *               byContainer: list<array{container: string, count: int, errors: int}>, rows: list<array<string, mixed>>}
      */
-    public function query(int $window, ?string $domain, int $now, int $limit): array
+    public function query(int $window, ?string $domain, int $now, int $limit, ?string $container = null): array
     {
         $all = 'dup = 0 AND ts > :from AND ts <= :to';
         $params = [':from' => $now - $window, ':to' => $now];
@@ -180,6 +183,10 @@ class Modules_LiveTrafficMonitor_Store
         if ($domain !== null) {
             $where .= ' AND domain = :domain';
             $filtered[':domain'] = $domain;
+        }
+        if ($container !== null) {
+            $where .= ' AND container = :container';
+            $filtered[':container'] = $container;
         }
 
         $classes = ['2xx' => 0, '3xx' => 0, '4xx' => 0, '5xx' => 0, 'other' => 0];
@@ -198,6 +205,14 @@ class Modules_LiveTrafficMonitor_Store
             static fn (array $r): array => ['domain' => (string) $r['domain'], 'count' => (int) $r['n']],
             $this->fetchAll("SELECT domain, COUNT(*) AS n FROM requests WHERE $all GROUP BY domain ORDER BY n DESC, domain", $params)
         );
+        $byContainer = array_map(
+            static fn (array $r): array => ['container' => (string) $r['container'], 'count' => (int) $r['n'], 'errors' => (int) $r['e']],
+            $this->fetchAll(
+                "SELECT container, COUNT(*) AS n, SUM(status BETWEEN 500 AND 599) AS e FROM requests
+                 WHERE $all AND container IS NOT NULL GROUP BY container ORDER BY n DESC, container",
+                $params
+            )
+        );
         $rows = array_map(static fn (array $r): array => [
             'ts' => (int) $r['ts'],
             'domain' => (string) $r['domain'],
@@ -209,8 +224,9 @@ class Modules_LiveTrafficMonitor_Store
             'ip' => (string) $r['ip'],
             'rt' => $r['rt'] === null ? null : (float) $r['rt'],
             'src' => (string) $r['src'],
+            'container' => $r['container'] === null ? null : (string) $r['container'],
         ], $this->fetchAll(
-            "SELECT ts, domain, scheme, method, path, status, bytes, ip, rt, src FROM requests WHERE $where
+            "SELECT ts, domain, scheme, method, path, status, bytes, ip, rt, src, container FROM requests WHERE $where
              ORDER BY ts DESC, id DESC LIMIT " . max(1, $limit),
             $filtered
         ));
@@ -220,6 +236,7 @@ class Modules_LiveTrafficMonitor_Store
             'byStatusClass' => $classes,
             'byStatus' => $byStatus,
             'byDomain' => $byDomain,
+            'byContainer' => $byContainer,
             'rows' => $rows,
         ];
     }

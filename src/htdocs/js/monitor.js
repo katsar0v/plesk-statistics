@@ -23,6 +23,20 @@
         const STORAGE_PREFIX = 'liveTrafficMonitor.';
         const MAX_BACKOFF_MS = 30000;
         const NO_VALUE = '—';
+        // The filter select holds websites and containers in one list; the prefixes keep their values apart.
+        const FILTER_DOMAIN = 'domain:';
+        const FILTER_CONTAINER = 'container:';
+        // Docker state -> [label, tone]. Tones: ok (green), warn (amber), bad (red), unknown (grey).
+        const CONTAINER_STATES = {
+            running: ['Running', 'ok'],
+            restarting: ['Restarting', 'warn'],
+            paused: ['Paused', 'warn'],
+            created: ['Created', 'warn'],
+            exited: ['Exited', 'bad'],
+            dead: ['Dead', 'bad'],
+            removing: ['Removing', 'bad'],
+            missing: ['Missing', 'bad'],
+        };
         const STATUS_TEXT = {
             200: 'OK', 201: 'Created', 202: 'Accepted', 204: 'No Content', 206: 'Partial Content',
             301: 'Moved Permanently', 302: 'Found', 303: 'See Other', 304: 'Not Modified',
@@ -42,7 +56,7 @@
 
         const el = {
             windowGroup: document.getElementById('ltm-window'),
-            domain: document.getElementById('ltm-domain'),
+            filter: document.getElementById('ltm-filter'),
             pause: document.getElementById('ltm-pause'),
             status: document.getElementById('ltm-status'),
             statusText: document.getElementById('ltm-status-text'),
@@ -50,6 +64,9 @@
             content: document.getElementById('ltm-content'),
             sites: document.getElementById('ltm-sites'),
             statuses: document.getElementById('ltm-statuses'),
+            dockerPanel: document.getElementById('ltm-containers-panel'),
+            dockerWarning: document.getElementById('ltm-docker-warning'),
+            containers: document.getElementById('ltm-containers'),
             requests: document.getElementById('ltm-requests'),
             footer: document.getElementById('ltm-footer'),
         };
@@ -61,16 +78,19 @@
         }
 
         const displayNames = new Map(config.domains.map((d) => [d.name, d.displayName]));
+        const containerNames = new Set(config.containers.map((c) => c.name));
         const cards = {};
         ['total', 'rps', '2xx', '3xx', '4xx', '5xx'].forEach((stat) => {
             const card = root.querySelector('[data-stat="' + stat + '"]');
             cards[stat] = { value: card.querySelector('.ltm-card-value'), sub: card.querySelector('.ltm-card-sub') };
         });
         const siteRows = new Map();
+        const containerRows = new Map();
 
         const state = {
             windowSec: config.defaultWindow,
-            domain: 'all',
+            domain: 'all',     // Only one of domain and container is not 'all' at a time.
+            container: 'all',
             paused: false,
             seq: 0,           // bumped whenever pending work is cancelled; stale responses are ignored
             controller: null, // AbortController of the request in flight
@@ -79,6 +99,9 @@
             newestTs: null,   // newest row already shown, to highlight what arrived since
             rowsKey: null,    // fingerprint of the rendered rows, to skip identical re-renders
         };
+
+        // Shown from the start only when there is something to show; each payload then decides.
+        el.dockerPanel.hidden = !config.containers.length;
 
         restoreFilters();
         buildControls();
@@ -95,6 +118,11 @@
                 return {
                     dataUrl: String(raw.dataUrl),
                     domains: Array.isArray(raw.domains) ? raw.domains : [],
+                    containers: Array.isArray(raw.containers)
+                        ? raw.containers
+                            .filter((c) => c && typeof c.name === 'string')
+                            .map((c) => ({ name: c.name, domains: Array.isArray(c.domains) ? c.domains.map(String) : [] }))
+                        : [],
                     windows: windows,
                     defaultWindow: windows.indexOf(Number(raw.defaultWindow)) >= 0 ? Number(raw.defaultWindow) : windows[0],
                     pollMs: Math.max(1000, Number(raw.pollMs) || 3000),
@@ -129,6 +157,10 @@
             if (savedDomain && displayNames.has(savedDomain)) {
                 state.domain = savedDomain;
             }
+            const savedContainer = storageGet('container');
+            if (state.domain === 'all' && savedContainer && containerNames.has(savedContainer)) {
+                state.container = savedContainer;
+            }
         }
 
         function buildControls() {
@@ -139,12 +171,32 @@
                 el.windowGroup.appendChild(button);
             });
 
-            const options = [new Option('All websites', 'all')];
-            config.domains
-                .slice()
-                .sort((a, b) => a.displayName.localeCompare(b.displayName))
-                .forEach((d) => options.push(new Option(d.displayName, d.name)));
-            options.forEach((option) => el.domain.appendChild(option));
+            el.filter.appendChild(new Option('All websites', 'all'));
+            appendFilterGroup(
+                'Websites',
+                config.domains
+                    .slice()
+                    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+                    .map((d) => new Option(d.displayName, FILTER_DOMAIN + d.name))
+            );
+            appendFilterGroup('Docker containers', config.containers.map((c) => new Option(c.name, FILTER_CONTAINER + c.name)));
+        }
+
+        function appendFilterGroup(label, options) {
+            if (!options.length) {
+                return;
+            }
+            const group = h('optgroup');
+            group.label = label;
+            options.forEach((option) => group.appendChild(option));
+            el.filter.appendChild(group);
+        }
+
+        function filterValue() {
+            if (state.container !== 'all') {
+                return FILTER_CONTAINER + state.container;
+            }
+            return state.domain !== 'all' ? FILTER_DOMAIN + state.domain : 'all';
         }
 
         function syncControls() {
@@ -153,7 +205,7 @@
                 button.classList.toggle('is-active', active);
                 button.setAttribute('aria-pressed', active ? 'true' : 'false');
             });
-            el.domain.value = state.domain;
+            el.filter.value = filterValue();
             el.pause.textContent = state.paused ? 'Resume' : 'Pause';
             el.pause.classList.toggle('is-paused', state.paused);
         }
@@ -165,11 +217,29 @@
                     setFilters({ windowSec: Number(button.dataset.window) });
                 }
             });
-            el.domain.addEventListener('change', () => setFilters({ domain: el.domain.value }));
+            el.filter.addEventListener('change', () => {
+                const value = el.filter.value;
+                if (value.indexOf(FILTER_CONTAINER) === 0) {
+                    setFilters({ container: value.slice(FILTER_CONTAINER.length) });
+                } else if (value.indexOf(FILTER_DOMAIN) === 0) {
+                    setFilters({ domain: value.slice(FILTER_DOMAIN.length) });
+                } else {
+                    setFilters({ domain: 'all', container: 'all' });
+                }
+            });
             el.sites.addEventListener('click', (event) => {
                 const row = event.target.closest('tr[data-domain]');
-                if (row) {
-                    setFilters({ domain: row.dataset.domain });
+                if (!row) {
+                    return;
+                }
+                // The "All websites" row clears the container filter too.
+                setFilters(row.dataset.domain === 'all' ? { domain: 'all', container: 'all' } : { domain: row.dataset.domain });
+            });
+            el.containers.addEventListener('click', (event) => {
+                const row = event.target.closest('tr[data-container]');
+                if (row && !row.classList.contains('is-static')) {
+                    // Clicking the selected container again goes back to everything.
+                    setFilters({ container: row.dataset.container === state.container ? 'all' : row.dataset.container });
                 }
             });
             el.pause.addEventListener('click', () => {
@@ -194,20 +264,33 @@
 
         function setFilters(changes) {
             const windowSec = changes.windowSec !== undefined ? changes.windowSec : state.windowSec;
-            const domain = changes.domain !== undefined ? changes.domain : state.domain;
-            if (config.windows.indexOf(windowSec) < 0 || (domain !== 'all' && !displayNames.has(domain))) {
+            let domain = changes.domain !== undefined ? changes.domain : state.domain;
+            let container = changes.container !== undefined ? changes.container : state.container;
+            // One filter at a time: whichever was just chosen replaces the other.
+            if (changes.container !== undefined && container !== 'all') {
+                domain = 'all';
+            } else if (changes.domain !== undefined && domain !== 'all') {
+                container = 'all';
+            }
+            if (
+                config.windows.indexOf(windowSec) < 0
+                || (domain !== 'all' && !displayNames.has(domain))
+                || (container !== 'all' && !containerNames.has(container))
+            ) {
                 return;
             }
-            if (windowSec === state.windowSec && domain === state.domain) {
+            if (windowSec === state.windowSec && domain === state.domain && container === state.container) {
                 return;
             }
             state.windowSec = windowSec;
             state.domain = domain;
+            state.container = container;
             state.failures = 0;
             state.newestTs = null;
             state.rowsKey = null;
             storageSet('window', windowSec);
             storageSet('domain', domain);
+            storageSet('container', container);
             syncControls();
             poll(); // Also while paused: one fetch so the view matches the controls.
         }
@@ -261,6 +344,7 @@
             const url = new URL(config.dataUrl, window.location.href);
             url.searchParams.set('window', state.windowSec);
             url.searchParams.set('domain', state.domain);
+            url.searchParams.set('container', state.container);
 
             const headers = { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' };
             const token = document.querySelector('meta[name="forgery_protection_token"]');
@@ -325,6 +409,7 @@
             renderSummary(p);
             renderSites(p);
             renderStatuses(p);
+            renderContainers(p);
             renderRequests(p);
             renderFooter(p);
         }
@@ -349,36 +434,59 @@
         function renderSites(p) {
             const sites = (p.byDomain || []).slice().sort((a, b) => b.count - a.count || a.domain.localeCompare(b.domain));
             const sum = sites.reduce((n, site) => n + site.count, 0);
-            const wanted = [{ domain: 'all', displayName: 'All websites', count: sum, share: null }];
+            const links = dockerLinks(p);
+            const wanted = [{ domain: 'all', displayName: 'All websites', count: sum, share: null, containers: null }];
             sites.forEach((site) => {
                 wanted.push({
                     domain: site.domain,
                     displayName: displayNames.get(site.domain) || site.domain,
                     count: site.count,
                     share: sum ? site.count / sum : 0,
+                    containers: links.get(site.domain) || null,
                 });
             });
+            syncRows(el.sites, siteRows, wanted, 'domain', createSiteRow, updateSiteRow);
+        }
 
-            const ordered = wanted.map((site) => {
-                let row = siteRows.get(site.domain);
+        // Which Docker containers each website is proxied to: domain -> sorted container names.
+        function dockerLinks(p) {
+            const list = Array.isArray(p.byContainer)
+                ? p.byContainer.map((c) => ({ name: c.container, domains: c.domains }))
+                : config.containers; // The payload doesn't say (yet); the page config does.
+            const links = new Map();
+            list.forEach((c) => {
+                (c.domains || []).forEach((domain) => {
+                    const names = links.get(domain) || [];
+                    names.push(c.name);
+                    links.set(domain, names);
+                });
+            });
+            links.forEach((names) => names.sort());
+            return links;
+        }
+
+        // Keeps one <tr> per item (keyed by item[keyName]) and only reorders the table when the order changed.
+        function syncRows(body, rows, wanted, keyName, create, update) {
+            const ordered = wanted.map((item) => {
+                let row = rows.get(item[keyName]);
                 if (!row) {
-                    row = createSiteRow(site.domain);
-                    siteRows.set(site.domain, row);
+                    row = create(item[keyName]);
+                    rows.set(item[keyName], row);
                 }
-                updateSiteRow(row, site);
+                update(row, item);
                 return row.tr;
             });
-            const keep = new Set(wanted.map((site) => site.domain));
-            siteRows.forEach((row, domain) => {
-                if (!keep.has(domain)) {
-                    siteRows.delete(domain);
+            const keep = new Set(wanted.map((item) => item[keyName]));
+            rows.forEach((row, key) => {
+                if (!keep.has(key)) {
+                    rows.delete(key);
                 }
             });
 
-            const current = el.sites.children;
+            const current = body.children;
             const inOrder = current.length === ordered.length && ordered.every((tr, i) => tr === current[i]);
             if (!inOrder) {
-                el.sites.replaceChildren(...ordered);
+                body.replaceChildren(...ordered);
             }
         }
 
@@ -388,7 +496,11 @@
             const nameCell = h('td', 'ltm-site');
             const button = h('button', 'ltm-link');
             button.type = 'button';
-            nameCell.appendChild(button);
+            const tag = h('span', 'ltm-tag', 'Docker');
+            tag.hidden = true;
+            const name = h('div', 'ltm-name');
+            name.append(button, tag);
+            nameCell.appendChild(name);
             const countCell = h('td', 'ltm-num');
             const fill = h('span');
             const bar = h('span', 'ltm-bar');
@@ -399,15 +511,20 @@
             const shareCell = h('td');
             shareCell.appendChild(share);
             tr.append(nameCell, countCell, shareCell);
-            return { tr: tr, button: button, countCell: countCell, bar: bar, fill: fill, pct: pct };
+            return { tr: tr, button: button, tag: tag, countCell: countCell, bar: bar, fill: fill, pct: pct };
         }
 
         function updateSiteRow(row, site) {
-            const selected = site.domain === state.domain;
+            // "All websites" is the selection only when no container filter is active either.
+            const selected = site.domain === 'all' ? state.domain === 'all' && state.container === 'all' : site.domain === state.domain;
             row.tr.classList.toggle('is-selected', selected);
             row.button.textContent = site.displayName;
             row.button.title = site.domain === 'all' ? 'Show all websites' : site.domain;
             row.button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            row.tag.hidden = !site.containers;
+            row.tag.title = site.containers
+                ? 'Proxied to Docker container' + (site.containers.length === 1 ? ' ' : 's ') + site.containers.join(', ')
+                : '';
             row.countCell.textContent = numberFormat.format(site.count);
             row.bar.hidden = site.share === null;
             row.fill.style.width = site.share === null ? '0' : (site.share * 100).toFixed(1) + '%';
@@ -439,6 +556,101 @@
             el.statuses.replaceChildren(list);
         }
 
+        // Hidden while no website has a Docker proxy rule (docker is null). Updated in place like the sites.
+        function renderContainers(p) {
+            el.dockerPanel.hidden = !p.docker;
+            if (!p.docker) {
+                return;
+            }
+            const warning = p.docker.available === false
+                ? 'Docker is not reachable' + (p.docker.error ? ': ' + String(p.docker.error).replace(/[.\s]+$/, '') : '') + '. Container states are unknown.'
+                : '';
+            if (el.dockerWarning.textContent !== warning) {
+                el.dockerWarning.textContent = warning;
+            }
+            el.dockerWarning.hidden = !warning;
+
+            const wanted = (p.byContainer || []).map((c) => ({
+                container: c.container,
+                image: c.image,
+                state: c.state,
+                health: c.health,
+                status: c.status,
+                websites: (c.domains || []).map((domain) => displayNames.get(domain) || domain),
+                count: c.count || 0,
+                errors: c.errors || 0,
+            }));
+            syncRows(el.containers, containerRows, wanted, 'container', createContainerRow, updateContainerRow);
+        }
+
+        function createContainerRow(name) {
+            const tr = h('tr');
+            tr.dataset.container = name;
+            const button = h('button', 'ltm-link');
+            button.type = 'button';
+            const nameCell = h('td', 'ltm-site');
+            nameCell.appendChild(button);
+            const dot = h('span', 'ltm-state-dot');
+            dot.setAttribute('aria-hidden', 'true');
+            const label = h('span');
+            const stateWrap = h('span', 'ltm-state');
+            stateWrap.append(dot, label);
+            const stateCell = h('td');
+            stateCell.appendChild(stateWrap);
+            const imageCell = h('td', 'ltm-mono ltm-muted');
+            const websitesCell = h('td', 'ltm-domains');
+            const countCell = h('td', 'ltm-num');
+            const errorsCell = h('td', 'ltm-num');
+            tr.append(nameCell, stateCell, imageCell, websitesCell, countCell, errorsCell);
+            return {
+                tr: tr, button: button, stateWrap: stateWrap, stateCell: stateCell, label: label, imageCell: imageCell,
+                websitesCell: websitesCell, countCell: countCell, errorsCell: errorsCell,
+            };
+        }
+
+        function updateContainerRow(row, c) {
+            const selected = c.container === state.container;
+            // Only containers from the page config can be used as a filter (the endpoint rejects others).
+            const filterable = containerNames.has(c.container);
+            row.tr.classList.toggle('is-selected', selected);
+            row.tr.classList.toggle('is-static', !filterable);
+            row.button.textContent = c.container;
+            row.button.disabled = !filterable;
+            row.button.title = !filterable ? c.container + ' (no longer has a Docker proxy rule)'
+                : selected ? 'Show all requests again' : 'Show requests answered by ' + c.container;
+            row.button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+
+            const display = containerState(c.state, c.health);
+            row.stateWrap.className = 'ltm-state ltm-state--' + display.tone;
+            row.label.textContent = display.label;
+            row.stateCell.title = c.status || '';
+            row.imageCell.textContent = c.image || NO_VALUE;
+            const websites = c.websites.join(', ');
+            row.websitesCell.textContent = websites || NO_VALUE;
+            row.websitesCell.title = websites;
+            row.countCell.textContent = numberFormat.format(c.count);
+            row.errorsCell.textContent = numberFormat.format(c.errors);
+            row.errorsCell.classList.toggle('ltm-err', c.errors > 0);
+        }
+
+        // Label and colour of a container's state. The label carries the meaning; the dot only echoes it.
+        function containerState(dockerState, health) {
+            const known = CONTAINER_STATES[dockerState];
+            if (!known) {
+                return { label: 'Unknown', tone: 'unknown' };
+            }
+            if (dockerState !== 'running' || !health) {
+                return { label: known[0], tone: known[1] };
+            }
+            if (health === 'healthy') {
+                return { label: 'Running · healthy', tone: 'ok' };
+            }
+            if (health === 'unhealthy') {
+                return { label: 'Running · unhealthy', tone: 'bad' };
+            }
+            return health === 'starting' ? { label: 'Starting', tone: 'warn' } : { label: known[0], tone: known[1] };
+        }
+
         function renderRequests(p) {
             const rows = p.rows || [];
             const first = rows[0];
@@ -462,7 +674,7 @@
                 const tr = h('tr', state.newestTs !== null && row.ts > state.newestTs ? 'is-new' : '');
                 tr.append(
                     cell('ltm-time', formatClock(row.ts), formatDateTime(row.ts)),
-                    cell('ltm-host', displayNames.get(row.domain) || row.domain, row.domain),
+                    hostCell(row),
                     cell('ltm-mono', row.method || NO_VALUE),
                     cell('ltm-url ltm-mono', row.path || NO_VALUE, fullUrl(row)),
                     statusCell(row.status),
@@ -483,6 +695,22 @@
             if (title) {
                 td.title = title;
             }
+            return td;
+        }
+
+        // The website, plus the Docker container that answered when there is one. Only the name gets truncated.
+        function hostCell(row) {
+            const name = displayNames.get(row.domain) || row.domain;
+            if (!row.container) {
+                return cell('ltm-host', name, row.domain);
+            }
+            const tag = h('span', 'ltm-tag', row.container);
+            tag.title = 'Answered by Docker container ' + row.container;
+            const line = h('div', 'ltm-name');
+            line.append(h('span', 'ltm-name-text', name), tag);
+            const td = h('td', 'ltm-host');
+            td.title = row.domain;
+            td.appendChild(line);
             return td;
         }
 

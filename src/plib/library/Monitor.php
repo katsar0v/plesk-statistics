@@ -10,6 +10,9 @@
  * that Apache hands back to nginx (X-Accel-Redirect) appear in both, and the nginx line wins
  * because it has the status the client actually received. So the result is the same whether a
  * site runs on nginx only, nginx + Apache, or Apache only.
+ *
+ * Websites with Docker proxy rules are logged by nginx too. Each such nginx line is tagged with
+ * the container its rule points at (see Modules_LiveTrafficMonitor_DockerRoutes).
  */
 class Modules_LiveTrafficMonitor_Monitor
 {
@@ -56,17 +59,19 @@ class Modules_LiveTrafficMonitor_Monitor
      * @param list<array{name: string, displayName: string, logDir: string}> $sites
      * @param int $window one of WINDOWS
      * @param string|null $domain a site name, or null for all sites
+     * @param array<string, mixed>|null $docker a Modules_LiveTrafficMonitor_DockerRoutes::load() result
+     * @param string|null $container a container name, or null for all requests
      * @return array<string, mixed> the response described in docs/data-contract.md
      */
-    public function poll(array $sites, int $window, ?string $domain, ?int $now = null): array
+    public function poll(array $sites, int $window, ?string $domain, ?int $now = null, ?array $docker = null, ?string $container = null): array
     {
         if (!in_array($window, self::WINDOWS, true)) {
             throw new InvalidArgumentException('Unsupported window');
         }
         $now ??= time();
         $store = $this->openStore();
-        $ingest = $this->ingest($store, $sites, $now);
-        $result = $store->query($window, $domain, $now, $this->options['rowLimit']);
+        $ingest = $this->ingest($store, $sites, $now, $docker['routes'] ?? []);
+        $result = $store->query($window, $domain, $now, $this->options['rowLimit'], $container);
 
         $displayNames = array_column($sites, 'displayName', 'name');
         foreach ($result['byDomain'] as &$entry) {
@@ -79,11 +84,14 @@ class Modules_LiveTrafficMonitor_Monitor
             'generatedAt' => $now,
             'window' => $window,
             'domain' => $domain ?? 'all',
+            'container' => $container ?? 'all',
             'total' => $result['total'],
             'rps' => round($result['total'] / $window, 2),
             'byStatusClass' => $result['byStatusClass'],
             'byStatus' => $result['byStatus'],
             'byDomain' => $result['byDomain'],
+            'byContainer' => self::byContainer($result['byContainer'], $docker),
+            'docker' => $docker === null ? null : ['available' => (bool) $docker['available'], 'error' => $docker['error']],
             'rows' => $result['rows'],
             'rowLimit' => $this->options['rowLimit'],
             'truncated' => $result['total'] > count($result['rows']),
@@ -102,10 +110,43 @@ class Modules_LiveTrafficMonitor_Monitor
     }
 
     /**
+     * Every container that a rule points at, with its counts in the window. Containers that are
+     * gone but still have requests in the window are listed too.
+     *
+     * @param list<array{container: string, count: int, errors: int}> $counts
+     * @param array<string, mixed>|null $docker
+     * @return list<array<string, mixed>>
+     */
+    private static function byContainer(array $counts, ?array $docker): array
+    {
+        $unknown = ['image' => null, 'state' => 'unknown', 'health' => null, 'status' => null, 'domains' => []];
+        $list = [];
+        foreach ($docker['containers'] ?? [] as $name => $info) {
+            $list[$name] = $info + ['count' => 0, 'errors' => 0];
+        }
+        foreach ($counts as $count) {
+            $list[$count['container']] = $count + ($list[$count['container']] ?? $unknown);
+        }
+        $list = array_values($list);
+        usort($list, static fn (array $a, array $b): int => $b['count'] <=> $a['count'] ?: strcmp($a['container'], $b['container']));
+        return array_map(static fn (array $c): array => [
+            'container' => $c['container'],
+            'image' => $c['image'],
+            'state' => $c['state'],
+            'health' => $c['health'],
+            'status' => $c['status'],
+            'domains' => $c['domains'],
+            'count' => $c['count'],
+            'errors' => $c['errors'],
+        ], $list);
+    }
+
+    /**
      * @param list<array{name: string, displayName: string, logDir: string}> $sites
+     * @param array<string, list<array{prefix: string, container: string, schemes: list<string>}>> $routes site name => Docker routes
      * @return array{lagging: bool, parseErrors: int, read: int, unreadable: int}
      */
-    private function ingest(Modules_LiveTrafficMonitor_Store $store, array $sites, int $now): array
+    private function ingest(Modules_LiveTrafficMonitor_Store $store, array $sites, int $now, array $routes): array
     {
         $summary = ['lagging' => false, 'parseErrors' => 0, 'read' => 0, 'unreadable' => 0];
 
@@ -170,7 +211,7 @@ class Modules_LiveTrafficMonitor_Monitor
                     $budget -= $result['bytes'];
                     $summary['lagging'] = $summary['lagging'] || $result['pending'];
 
-                    $rows = $this->toRows($result['lines'], $file, $now, $summary['parseErrors']);
+                    $rows = $this->toRows($result['lines'], $file, $now, $summary['parseErrors'], $routes[$file['domain']] ?? []);
                     if ($rows) {
                         $store->insertRequests($rows);
                         $oldest = min(array_column($rows, ':ts'));
@@ -198,10 +239,13 @@ class Modules_LiveTrafficMonitor_Monitor
     /**
      * @param list<string> $lines
      * @param array{path: string, domain: string, src: string, scheme: string} $file
+     * @param list<array{prefix: string, container: string, schemes: list<string>}> $routes the site's Docker routes
      * @return list<array<string, mixed>>
      */
-    private function toRows(array $lines, array $file, int $now, int &$parseErrors): array
+    private function toRows(array $lines, array $file, int $now, int &$parseErrors, array $routes): array
     {
+        // Only nginx proxies to containers; Apache's lines are requests nginx passed to Apache.
+        $routes = $file['src'] === 'nginx' ? $routes : [];
         $rows = [];
         foreach ($lines as $line) {
             if ($line === '') {
@@ -226,6 +270,9 @@ class Modules_LiveTrafficMonitor_Monitor
                 ':bytes' => $entry['bytes'],
                 ':ip' => $entry['ip'],
                 ':rt' => $entry['rt'],
+                ':container' => $routes && $entry['method'] !== '-'
+                    ? Modules_LiveTrafficMonitor_DockerRoutes::match($routes, $file['scheme'], $entry['target'])
+                    : null,
                 ':k' => self::requestKey($file, $entry),
             ];
         }

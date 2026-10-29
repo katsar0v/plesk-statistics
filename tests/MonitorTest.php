@@ -66,6 +66,7 @@ final class MonitorTest extends TestCase
         self::assertTrue($r['ok']);
         self::assertSame(self::NOW, $r['generatedAt']);
         self::assertSame('all', $r['domain']);
+        self::assertSame('all', $r['container']);
         self::assertSame(4, $r['total']);
         self::assertSame(round(4 / 60, 2), $r['rps']);
         self::assertSame(['2xx' => 1, '3xx' => 1, '4xx' => 1, '5xx' => 1, 'other' => 0], $r['byStatusClass']);
@@ -83,7 +84,10 @@ final class MonitorTest extends TestCase
             'ip' => '198.51.100.1',
             'rt' => null,
             'src' => 'nginx',
+            'container' => null,
         ], $r['rows'][3]);
+        self::assertSame([], $r['byContainer']);
+        self::assertNull($r['docker']);
         self::assertFalse($r['truncated']);
         self::assertFalse($r['lagging']);
         self::assertSame(['read' => 2, 'unreadable' => 0], $r['files']);
@@ -236,6 +240,108 @@ final class MonitorTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->monitor()->poll([], 30, null, self::NOW);
+    }
+
+    /** A Modules_LiveTrafficMonitor_DockerRoutes::load() result for a.com. */
+    private static function docker(array $routes, array $containers, bool $available = true): array
+    {
+        $info = [];
+        foreach ($containers as $name => $state) {
+            $info[$name] = ['container' => $name, 'image' => $name . ':1', 'state' => $state, 'health' => null,
+                'status' => null, 'domains' => ['a.com']];
+        }
+        return [
+            'available' => $available,
+            'error' => $available ? null : 'Docker is down',
+            'routes' => ['a.com' => $routes],
+            'containers' => $info,
+        ];
+    }
+
+    public function testDockerProxiedRequestsAreTaggedWithTheirContainer(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log',
+            self::line(self::NOW - 6, 'GET /api/orders?id=1 HTTP/2.0', 502),
+            self::line(self::NOW - 5, 'GET /shop HTTP/2.0'),
+            self::line(self::NOW - 4, 'GET /.well-known/acme-challenge/abc HTTP/1.1'),
+            self::line(self::NOW - 3, "\x16\x03\x01", 400)
+        );
+        $this->append($site, 'access_ssl_log', self::line(self::NOW - 2, 'GET /legacy.php HTTP/1.0'));
+        $docker = self::docker([
+            ['prefix' => '/api', 'container' => 'api', 'schemes' => ['https', 'http']],
+            ['prefix' => '/', 'container' => 'web', 'schemes' => ['https', 'http']],
+        ], ['web' => 'running', 'api' => 'exited']);
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW, $docker);
+
+        self::assertSame(
+            ['/legacy.php' => null, '(invalid request)' => null, '/.well-known/acme-challenge/abc' => null, '/shop' => 'web', '/api/orders?id=1' => 'api'],
+            array_column($r['rows'], 'container', 'path')
+        );
+        self::assertSame(['available' => true, 'error' => null], $r['docker']);
+        self::assertSame([
+            ['container' => 'api', 'image' => 'api:1', 'state' => 'exited', 'health' => null, 'status' => null,
+                'domains' => ['a.com'], 'count' => 1, 'errors' => 1],
+            ['container' => 'web', 'image' => 'web:1', 'state' => 'running', 'health' => null, 'status' => null,
+                'domains' => ['a.com'], 'count' => 1, 'errors' => 0],
+        ], $r['byContainer']);
+    }
+
+    public function testContainerFilterKeepsFullContainerBreakdown(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log',
+            self::line(self::NOW - 3, 'GET /api/a HTTP/2.0'),
+            self::line(self::NOW - 2, 'GET /api/b HTTP/2.0', 503),
+            self::line(self::NOW - 1, 'GET / HTTP/2.0')
+        );
+        $docker = self::docker([
+            ['prefix' => '/api', 'container' => 'api', 'schemes' => ['https']],
+            ['prefix' => '/', 'container' => 'web', 'schemes' => ['https']],
+        ], ['web' => 'running', 'api' => 'running']);
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW, $docker, 'api');
+
+        self::assertSame('api', $r['container']);
+        self::assertSame(2, $r['total']);
+        self::assertSame(['/api/b', '/api/a'], array_column($r['rows'], 'path'));
+        self::assertSame([['status' => 200, 'count' => 1], ['status' => 503, 'count' => 1]], $r['byStatus']);
+        self::assertSame(['api' => 2, 'web' => 1], array_column($r['byContainer'], 'count', 'container'));
+        self::assertSame(['a.com' => 3], array_column($r['byDomain'], 'count', 'domain'));
+    }
+
+    public function testHttpRequestsOfSitesThatRedirectToHttpsAreNotTagged(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_log', self::line(self::NOW - 2, 'GET / HTTP/1.1', 301));
+        $this->append($site, 'proxy_access_ssl_log', self::line(self::NOW - 1, 'GET / HTTP/2.0'));
+        $docker = self::docker([['prefix' => '/', 'container' => 'web', 'schemes' => ['https']]], ['web' => 'running']);
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW, $docker);
+
+        self::assertSame(['https' => 'web', 'http' => null], array_column($r['rows'], 'container', 'scheme'));
+    }
+
+    public function testByContainerListsIdleContainersAndOnesThatAreGone(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log', self::line(self::NOW - 2));
+        $monitor = $this->monitor();
+        $monitor->poll([$site], 60, null, self::NOW,
+            self::docker([['prefix' => '/', 'container' => 'old', 'schemes' => ['https']]], ['old' => 'running']));
+
+        // The rule now points at a new, idle container; the old one's request is still in the window.
+        $r = $monitor->poll([$site], 60, null, self::NOW,
+            self::docker([['prefix' => '/', 'container' => 'new', 'schemes' => ['https']]], ['new' => 'created'], false));
+
+        self::assertSame(['available' => false, 'error' => 'Docker is down'], $r['docker']);
+        self::assertSame([
+            ['container' => 'old', 'image' => null, 'state' => 'unknown', 'health' => null, 'status' => null,
+                'domains' => [], 'count' => 1, 'errors' => 0],
+            ['container' => 'new', 'image' => 'new:1', 'state' => 'created', 'health' => null, 'status' => null,
+                'domains' => ['a.com'], 'count' => 0, 'errors' => 0],
+        ], $r['byContainer']);
     }
 
     public function testStateDirectoryIsPrivate(): void
