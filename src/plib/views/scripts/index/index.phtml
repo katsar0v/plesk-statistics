@@ -19,8 +19,8 @@
             <div class="ltm-segmented" id="ltm-window" role="group" aria-labelledby="ltm-window-label"></div>
         </div>
         <div class="ltm-field">
-            <label class="ltm-field-label" for="ltm-domain">Website</label>
-            <select class="ltm-select" id="ltm-domain"></select>
+            <label class="ltm-field-label" for="ltm-filter">Show</label>
+            <select class="ltm-select" id="ltm-filter"></select>
         </div>
         <div class="ltm-field">
             <button type="button" class="ltm-btn" id="ltm-pause">Pause</button>
@@ -89,6 +89,26 @@
                 <ul class="ltm-statuses" id="ltm-statuses"></ul>
             </section>
         </div>
+
+        <section class="ltm-panel ltm-panel--containers" id="ltm-containers-panel" hidden>
+            <h2 class="ltm-heading">Docker containers</h2>
+            <p class="ltm-warning" id="ltm-docker-warning" hidden></p>
+            <div class="ltm-scroll ltm-scroll--short">
+                <table class="ltm-table ltm-table--containers">
+                    <thead>
+                        <tr>
+                            <th scope="col">Container</th>
+                            <th scope="col">State</th>
+                            <th scope="col">Image</th>
+                            <th scope="col">Websites</th>
+                            <th scope="col" class="ltm-num">Requests</th>
+                            <th scope="col" class="ltm-num">5xx</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ltm-containers"></tbody>
+                </table>
+            </div>
+        </section>
 
         <section class="ltm-panel">
             <h2 class="ltm-heading">Requests <span class="ltm-heading-note">newest first</span></h2>

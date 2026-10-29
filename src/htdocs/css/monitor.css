@@ -445,17 +445,20 @@ html[data-theme="dark"] .ltm {
     animation: ltm-flash 1.8s ease-out;
 }
 
-/* By website */
+/* By website and Docker containers: clicking a row sets the filter */
 
-.ltm .ltm-table--sites tbody tr {
+.ltm .ltm-table--sites tbody tr,
+.ltm .ltm-table--containers tbody tr {
     cursor: pointer;
 }
 
-.ltm .ltm-table--sites tbody tr.is-selected td {
+.ltm .ltm-table--sites tbody tr.is-selected td,
+.ltm .ltm-table--containers tbody tr.is-selected td {
     background: var(--ltm-accent-soft);
 }
 
-.ltm .ltm-table--sites .ltm-site {
+.ltm .ltm-table--sites .ltm-site,
+.ltm .ltm-table--containers .ltm-site {
     max-width: 16rem;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -482,6 +485,14 @@ html[data-theme="dark"] .ltm {
 .ltm .ltm-link:hover {
     color: var(--ltm-accent);
     text-decoration: underline;
+}
+
+/* A container that can't be a filter (not in the page config) still lists its numbers. */
+.ltm .ltm-link:disabled,
+.ltm .ltm-link:disabled:hover {
+    color: var(--ltm-text);
+    cursor: default;
+    text-decoration: none;
 }
 
 .ltm .ltm-share {
@@ -513,6 +524,92 @@ html[data-theme="dark"] .ltm {
     color: var(--ltm-muted);
     font-size: 12px;
     text-align: right;
+}
+
+/* Docker */
+
+.ltm .ltm-panel--containers {
+    margin-bottom: 1rem;
+}
+
+.ltm .ltm-table--containers {
+    min-width: 40rem;
+}
+
+.ltm .ltm-table--containers tbody tr.is-static {
+    cursor: default;
+}
+
+.ltm .ltm-table--containers .ltm-domains {
+    max-width: 18rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ltm .ltm-table .ltm-err {
+    color: var(--ltm-5xx-fg);
+    font-weight: 600;
+}
+
+.ltm .ltm-warning {
+    margin: 0;
+    padding: 0.55rem 1rem;
+    border-bottom: 1px solid var(--ltm-border);
+    border-left: 4px solid var(--ltm-4xx-bar);
+    background: var(--ltm-4xx-bg);
+    color: var(--ltm-4xx-fg);
+    overflow-wrap: anywhere;
+}
+
+/* The state is spelled out next to the dot, so the colour never carries the meaning alone. */
+.ltm .ltm-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.ltm .ltm-state-dot {
+    flex: none;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    background: var(--ltm-other-bar);
+}
+
+.ltm .ltm-state--ok .ltm-state-dot { background: var(--ltm-2xx-bar); }
+.ltm .ltm-state--warn .ltm-state-dot { background: var(--ltm-4xx-bar); }
+.ltm .ltm-state--bad .ltm-state-dot { background: var(--ltm-5xx-bar); }
+
+/* A name followed by a tag: only the name is truncated, so the tag stays visible. */
+.ltm .ltm-name {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
+.ltm .ltm-name > .ltm-link,
+.ltm .ltm-name-text {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ltm .ltm-tag {
+    flex: none;
+    max-width: 10rem;
+    overflow: hidden;
+    padding: 0 0.4rem;
+    border: 1px solid var(--ltm-border);
+    border-radius: 4px;
+    background: var(--ltm-surface-alt);
+    color: var(--ltm-muted);
+    font-size: 11px;
+    line-height: 1.5;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* Top statuses */
