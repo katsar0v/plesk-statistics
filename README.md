@@ -1,6 +1,6 @@
 # Live Traffic Monitor for Plesk
 
-**Version 1.1.0** · Plesk Obsidian 18.0.50+ on Linux · [Changelog](CHANGELOG.md)
+**Version 1.2.0** · Plesk Obsidian 18.0.50+ on Linux · [Changelog](CHANGELOG.md)
 
 A Plesk Obsidian extension that adds a **Live Traffic** page for server administrators. The page
 shows the HTTP requests reaching every website on the server, nearly in real time.
@@ -12,10 +12,14 @@ shows the HTTP requests reaching every website on the server, nearly in real tim
 - **Time windows:** the last 1, 2 or 5 minutes, refreshed every 3 seconds without reloading the page.
 - **Summary:** requests per second, plus a breakdown by website and by status. Click a website to
   filter by it.
+- **Charts** across the time window: requests per second by status, bandwidth, the busiest websites
+  and the average response time (when the log format records it). Hover a chart, or focus it and use
+  the arrow keys, to read the values. Click a website in the chart's legend to filter by it.
 - **Request list:** the newest requests first, with time, website, method, URL, status, IP address,
   response size and response time (when the log format records it).
 - **Docker containers:** requests to websites behind a Docker proxy rule show the container that
-  answered them. A panel lists each container with its state, health, requests and 5xx errors.
+  answered them. A collapsible panel lists each container with its state, health, requests and 5xx
+  errors; while it is closed, its header still says when a container is stopped or unhealthy.
   Click a container to filter by it.
 - **Secrets hidden:** tokens, passwords, e-mail addresses and other secrets in URLs are replaced
   with `[redacted]`.
@@ -96,7 +100,7 @@ You need root access to the server:
 
 ```sh
 curl -fsSLo /tmp/live-traffic-monitor.zip \
-  https://github.com/katsar0v/plesk-statistics/releases/download/v1.1.0/live-traffic-monitor-1.1.0-1.zip
+  https://github.com/katsar0v/plesk-statistics/releases/download/v1.2.0/live-traffic-monitor-1.2.0-1.zip
 plesk bin extension --install /tmp/live-traffic-monitor.zip     # use --upgrade for a newer version
 rm /tmp/live-traffic-monitor.zip
 ```
@@ -109,7 +113,7 @@ Tools & Settings. To remove it: `plesk bin extension --uninstall live-traffic-mo
 - Requests for the server's own hostname, the default virtual host, webmail and the Plesk panel
   aren't included, only websites with hosting.
 - **Response time** needs a log format that records it. Plesk's default format doesn't, so the
-  column shows "—".
+  column shows "—" and the response-time chart says so.
 - **Duplicate detection** relies on Apache logging the real client IP. Plesk does this by default
   with `mod_remoteip`.
 - **Docker rules on a remote Docker host** are shown by their target address, with the state

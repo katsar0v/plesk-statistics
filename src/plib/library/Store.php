@@ -14,6 +14,10 @@ class Modules_LiveTrafficMonitor_Store
     private const DUPLICATE_BEFORE = 2;
     private const DUPLICATE_AFTER = 60;
 
+    private const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx', 'other'];
+    /** Websites that get their own series in the timeline. */
+    private const TIMELINE_DOMAINS = 5;
+
     private PDO $db;
 
     public function __construct(string $file)
@@ -170,12 +174,24 @@ class Modules_LiveTrafficMonitor_Store
     /**
      * Requests with `$now - $window < ts <= $now`, Apache duplicates excluded.
      *
+     * `timeline` cuts the window into `$buckets` equal slices, oldest first: slice i holds the requests
+     * with `from + i * bucket < ts <= from + (i + 1) * bucket`. Its status classes, `bytes` and `rt`
+     * (average response time in seconds, null where no request was timed) apply the domain and
+     * container filters; `byDomain` has the series of the busiest websites and applies only the window.
+     *
+     * @param int $buckets how many slices the timeline has; must divide `$window`
      * @return array{total: int, byStatusClass: array<string, int>, byStatus: list<array{status: int, count: int}>,
      *               byDomain: list<array{domain: string, count: int}>,
-     *               byContainer: list<array{container: string, count: int, errors: int}>, rows: list<array<string, mixed>>}
+     *               byContainer: list<array{container: string, count: int, errors: int}>,
+     *               timeline: array{from: int, bucket: int, byStatusClass: array<string, list<int>>, bytes: list<int>,
+     *                               rt: list<float|null>, byDomain: list<array{domain: string, counts: list<int>}>},
+     *               rows: list<array<string, mixed>>}
      */
-    public function query(int $window, ?string $domain, int $now, int $limit, ?string $container = null): array
+    public function query(int $window, ?string $domain, int $now, int $limit, ?string $container = null, int $buckets = 30): array
     {
+        if ($buckets < 1 || $window % $buckets !== 0) {
+            throw new InvalidArgumentException('The window must be a multiple of the bucket count');
+        }
         $all = 'dup = 0 AND ts > :from AND ts <= :to';
         $params = [':from' => $now - $window, ':to' => $now];
         $where = $all;
@@ -188,14 +204,12 @@ class Modules_LiveTrafficMonitor_Store
             $where .= ' AND container = :container';
             $filtered[':container'] = $container;
         }
+        $size = intdiv($window, $buckets);
 
-        $classes = ['2xx' => 0, '3xx' => 0, '4xx' => 0, '5xx' => 0, 'other' => 0];
-        $total = 0;
-        foreach ($this->fetchAll("SELECT status / 100 AS c, COUNT(*) AS n FROM requests WHERE $where GROUP BY c", $filtered) as $row) {
-            $class = in_array((int) $row['c'], [2, 3, 4, 5], true) ? $row['c'] . 'xx' : 'other';
-            $classes[$class] += (int) $row['n'];
-            $total += (int) $row['n'];
-        }
+        // The timeline's slices add up to the totals, so one query answers both.
+        $series = $this->series($where, $filtered, $size, $buckets);
+        $classes = array_map(static fn (array $counts): int => array_sum($counts), $series['byStatusClass']);
+        $total = array_sum($classes);
 
         $byStatus = array_map(
             static fn (array $r): array => ['status' => (int) $r['status'], 'count' => (int) $r['n']],
@@ -237,8 +251,89 @@ class Modules_LiveTrafficMonitor_Store
             'byStatus' => $byStatus,
             'byDomain' => $byDomain,
             'byContainer' => $byContainer,
+            'timeline' => [
+                'from' => $now - $window,
+                'bucket' => $size,
+                'byStatusClass' => $series['byStatusClass'],
+                'bytes' => $series['bytes'],
+                'rt' => $series['rt'],
+                'byDomain' => $this->domainSeries(
+                    $all,
+                    $params,
+                    array_slice(array_column($byDomain, 'domain'), 0, self::TIMELINE_DOMAINS),
+                    $size,
+                    $buckets
+                ),
+            ],
             'rows' => $rows,
         ];
+    }
+
+    /**
+     * Per slice of the window: request counts by status class, response bytes and average response time.
+     *
+     * @param array<string, int|string> $params the parameters of `$where`
+     * @return array{byStatusClass: array<string, list<int>>, bytes: list<int>, rt: list<float|null>}
+     */
+    private function series(string $where, array $params, int $size, int $buckets): array
+    {
+        $byClass = [];
+        foreach (self::STATUS_CLASSES as $class) {
+            $byClass[$class] = array_fill(0, $buckets, 0);
+        }
+        $bytes = array_fill(0, $buckets, 0);
+        $timedSum = array_fill(0, $buckets, 0.0);
+        $timedCount = array_fill(0, $buckets, 0);
+
+        // ts > :from, so the slice index is never negative; ts <= :to keeps it below $buckets.
+        $sql = "SELECT (ts - :from - 1) / :size AS b, status / 100 AS c, COUNT(*) AS n, SUM(bytes) AS bytes,
+                       SUM(rt) AS rt_sum, COUNT(rt) AS rt_count
+                FROM requests WHERE $where GROUP BY b, c";
+        foreach ($this->fetchAll($sql, $params + [':size' => $size]) as $row) {
+            $b = (int) $row['b'];
+            $family = (int) $row['c'];
+            $byClass[$family >= 2 && $family <= 5 ? $family . 'xx' : 'other'][$b] += (int) $row['n'];
+            $bytes[$b] += (int) $row['bytes'];
+            $timedSum[$b] += (float) $row['rt_sum'];
+            $timedCount[$b] += (int) $row['rt_count'];
+        }
+
+        $rt = [];
+        for ($b = 0; $b < $buckets; $b++) {
+            $rt[] = $timedCount[$b] > 0 ? round($timedSum[$b] / $timedCount[$b], 4) : null;
+        }
+        return ['byStatusClass' => $byClass, 'bytes' => $bytes, 'rt' => $rt];
+    }
+
+    /**
+     * Request counts per slice of the window for each of the given websites, in the given order.
+     *
+     * @param array<string, int|string> $params the parameters of `$all`
+     * @param list<string> $domains
+     * @return list<array{domain: string, counts: list<int>}>
+     */
+    private function domainSeries(string $all, array $params, array $domains, int $size, int $buckets): array
+    {
+        if (!$domains) {
+            return [];
+        }
+        $names = [];
+        foreach ($domains as $i => $name) {
+            $names[':d' . $i] = $name;
+        }
+        $counts = array_fill(0, count($domains), array_fill(0, $buckets, 0));
+        $position = array_flip($domains);
+        $sql = 'SELECT domain, (ts - :from - 1) / :size AS b, COUNT(*) AS n FROM requests
+                WHERE ' . $all . ' AND domain IN (' . implode(', ', array_keys($names)) . ') GROUP BY domain, b';
+        foreach ($this->fetchAll($sql, $params + [':size' => $size] + $names) as $row) {
+            $counts[$position[$row['domain']]][(int) $row['b']] += (int) $row['n'];
+        }
+
+        $series = [];
+        foreach ($domains as $i => $name) {
+            $series[] = ['domain' => $name, 'counts' => $counts[$i]];
+        }
+        return $series;
     }
 
     /** @return list<array<string, mixed>> */

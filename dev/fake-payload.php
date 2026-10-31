@@ -138,12 +138,70 @@ function ltm_fake_payload(array $sites, int $window, ?string $domain, array $opt
         'byDomain' => $byDomain,
         'byContainer' => $byContainer,
         'docker' => $docker,
+        'timeline' => ltm_fake_timeline($all, $matching, $byDomain, $now, $window),
         'rows' => array_slice($matching, 0, $rowLimit),
         'rowLimit' => $rowLimit,
         'truncated' => count($matching) > $rowLimit,
         'lagging' => !empty($options['lagging']),
         'parseErrors' => (int) ($options['parseErrors'] ?? 0),
         'files' => ['read' => count($sites) * 4, 'unreadable' => 0],
+    ];
+}
+
+/**
+ * The payload's `timeline`: the window cut into equal slices, oldest first, as Store::query() does it.
+ *
+ * @param list<array<string, mixed>> $all every row of the window
+ * @param list<array<string, mixed>> $matching the rows that pass the domain and container filters
+ * @param list<array{domain: string, count: int}> $byDomain busiest first
+ * @return array<string, mixed>
+ */
+function ltm_fake_timeline(array $all, array $matching, array $byDomain, int $now, int $window, int $buckets = 30): array
+{
+    $from = $now - $window;
+    $size = intdiv($window, $buckets);
+    $slice = static fn (array $row): int => intdiv($row['ts'] - $from - 1, $size);
+
+    $byStatusClass = [];
+    foreach (['2xx', '3xx', '4xx', '5xx', 'other'] as $class) {
+        $byStatusClass[$class] = array_fill(0, $buckets, 0);
+    }
+    $bytes = array_fill(0, $buckets, 0);
+    $timedSum = array_fill(0, $buckets, 0.0);
+    $timedCount = array_fill(0, $buckets, 0);
+    foreach ($matching as $row) {
+        $i = $slice($row);
+        $family = intdiv($row['status'], 100);
+        $byStatusClass[$family >= 2 && $family <= 5 ? $family . 'xx' : 'other'][$i]++;
+        $bytes[$i] += $row['bytes'];
+        if ($row['rt'] !== null) {
+            $timedSum[$i] += $row['rt'];
+            $timedCount[$i]++;
+        }
+    }
+    $rt = [];
+    foreach ($timedCount as $i => $count) {
+        $rt[] = $count > 0 ? round($timedSum[$i] / $count, 4) : null;
+    }
+
+    $busiest = array_column(array_slice(array_filter($byDomain, static fn (array $d): bool => $d['count'] > 0), 0, 5), 'domain');
+    $domains = [];
+    foreach ($busiest as $name) {
+        $domains[$name] = ['domain' => $name, 'counts' => array_fill(0, $buckets, 0)];
+    }
+    foreach ($all as $row) {
+        if (isset($domains[$row['domain']])) {
+            $domains[$row['domain']]['counts'][$slice($row)]++;
+        }
+    }
+
+    return [
+        'from' => $from,
+        'bucket' => $size,
+        'byStatusClass' => $byStatusClass,
+        'bytes' => $bytes,
+        'rt' => $rt,
+        'byDomain' => array_values($domains),
     ];
 }
 

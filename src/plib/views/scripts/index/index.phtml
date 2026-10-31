@@ -67,6 +67,29 @@
             </div>
         </div>
 
+        <div class="ltm-grid ltm-charts" id="ltm-charts">
+            <section class="ltm-panel ltm-panel--chart">
+                <h2 class="ltm-heading">Requests per second <span class="ltm-heading-note">by status</span></h2>
+                <div class="ltm-chart" id="ltm-chart-requests"></div>
+                <ul class="ltm-chart-foot ltm-legend" id="ltm-legend-requests"></ul>
+            </section>
+            <section class="ltm-panel ltm-panel--chart">
+                <h2 class="ltm-heading">Bandwidth <span class="ltm-heading-note">sent per second</span></h2>
+                <div class="ltm-chart" id="ltm-chart-bandwidth"></div>
+                <p class="ltm-chart-foot" id="ltm-foot-bandwidth"></p>
+            </section>
+            <section class="ltm-panel ltm-panel--chart">
+                <h2 class="ltm-heading">Top websites <span class="ltm-heading-note">requests per second</span></h2>
+                <div class="ltm-chart" id="ltm-chart-sites"></div>
+                <ul class="ltm-chart-foot ltm-legend" id="ltm-legend-sites"></ul>
+            </section>
+            <section class="ltm-panel ltm-panel--chart">
+                <h2 class="ltm-heading">Response time <span class="ltm-heading-note">average</span></h2>
+                <div class="ltm-chart" id="ltm-chart-rt"></div>
+                <p class="ltm-chart-foot" id="ltm-foot-rt"></p>
+            </section>
+        </div>
+
         <div class="ltm-grid">
             <section class="ltm-panel">
                 <h2 class="ltm-heading">By website</h2>
@@ -90,8 +113,11 @@
             </section>
         </div>
 
-        <section class="ltm-panel ltm-panel--containers" id="ltm-containers-panel" hidden>
-            <h2 class="ltm-heading">Docker containers</h2>
+        <details class="ltm-panel ltm-panel--containers" id="ltm-containers-panel" hidden>
+            <summary class="ltm-heading ltm-disclosure">
+                <h2 class="ltm-disclosure-title">Docker containers</h2>
+                <span class="ltm-heading-note" id="ltm-containers-note"></span>
+            </summary>
             <p class="ltm-warning" id="ltm-docker-warning" hidden></p>
             <div class="ltm-scroll ltm-scroll--short">
                 <table class="ltm-table ltm-table--containers">
@@ -108,7 +134,7 @@
                     <tbody id="ltm-containers"></tbody>
                 </table>
             </div>
-        </section>
+        </details>
 
         <section class="ltm-panel">
             <h2 class="ltm-heading">Requests <span class="ltm-heading-note">newest first</span></h2>
