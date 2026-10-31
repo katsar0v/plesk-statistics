@@ -1,8 +1,14 @@
 # Changelog
 
+## 1.2.1 – 2026-10-31
+
+- **No more empty response-time chart.** Plesk's default log format doesn't record how long a request took, so the chart is gone and "Top websites" takes its full row. The data endpoint no longer sends `timeline.rt`.
+- **"Time taken" column** appears only when a listed request has a response time, for servers with a customised log format.
+- The bandwidth axis switches to the next unit from half of it, so it reads "0.5 MB" rather than "1,000 KB".
+
 ## 1.2.0 – 2026-10-31
 
-- **Charts** above the breakdowns, across the selected time window: requests per second by status, bandwidth, the five busiest websites and the average response time. Hovering (or the arrow keys) shows each slice's numbers; the website legend sets the filter.
+- **Charts** above the breakdowns, across the selected time window: requests per second by status, bandwidth, the five busiest websites and the average response time (removed in 1.2.1). Hovering (or the arrow keys) shows each slice's numbers; the website legend sets the filter.
 - **Docker panel collapses.** It is closed by default and remembers whether you opened it. The closed header counts the containers and says when one is stopped, unhealthy or Docker can't be reached.
 - The data endpoint returns the window in 30 slices (`timeline`), counted from the same requests as the totals.
 

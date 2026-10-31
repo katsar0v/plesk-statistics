@@ -175,16 +175,16 @@ class Modules_LiveTrafficMonitor_Store
      * Requests with `$now - $window < ts <= $now`, Apache duplicates excluded.
      *
      * `timeline` cuts the window into `$buckets` equal slices, oldest first: slice i holds the requests
-     * with `from + i * bucket < ts <= from + (i + 1) * bucket`. Its status classes, `bytes` and `rt`
-     * (average response time in seconds, null where no request was timed) apply the domain and
-     * container filters; `byDomain` has the series of the busiest websites and applies only the window.
+     * with `from + i * bucket < ts <= from + (i + 1) * bucket`. Its status classes and `bytes` apply the
+     * domain and container filters; `byDomain` has the series of the busiest websites and applies only
+     * the window.
      *
      * @param int $buckets how many slices the timeline has; must divide `$window`
      * @return array{total: int, byStatusClass: array<string, int>, byStatus: list<array{status: int, count: int}>,
      *               byDomain: list<array{domain: string, count: int}>,
      *               byContainer: list<array{container: string, count: int, errors: int}>,
      *               timeline: array{from: int, bucket: int, byStatusClass: array<string, list<int>>, bytes: list<int>,
-     *                               rt: list<float|null>, byDomain: list<array{domain: string, counts: list<int>}>},
+     *                               byDomain: list<array{domain: string, counts: list<int>}>},
      *               rows: list<array<string, mixed>>}
      */
     public function query(int $window, ?string $domain, int $now, int $limit, ?string $container = null, int $buckets = 30): array
@@ -256,7 +256,6 @@ class Modules_LiveTrafficMonitor_Store
                 'bucket' => $size,
                 'byStatusClass' => $series['byStatusClass'],
                 'bytes' => $series['bytes'],
-                'rt' => $series['rt'],
                 'byDomain' => $this->domainSeries(
                     $all,
                     $params,
@@ -270,10 +269,10 @@ class Modules_LiveTrafficMonitor_Store
     }
 
     /**
-     * Per slice of the window: request counts by status class, response bytes and average response time.
+     * Per slice of the window: request counts by status class and response bytes.
      *
      * @param array<string, int|string> $params the parameters of `$where`
-     * @return array{byStatusClass: array<string, list<int>>, bytes: list<int>, rt: list<float|null>}
+     * @return array{byStatusClass: array<string, list<int>>, bytes: list<int>}
      */
     private function series(string $where, array $params, int $size, int $buckets): array
     {
@@ -282,27 +281,18 @@ class Modules_LiveTrafficMonitor_Store
             $byClass[$class] = array_fill(0, $buckets, 0);
         }
         $bytes = array_fill(0, $buckets, 0);
-        $timedSum = array_fill(0, $buckets, 0.0);
-        $timedCount = array_fill(0, $buckets, 0);
 
         // ts > :from, so the slice index is never negative; ts <= :to keeps it below $buckets.
-        $sql = "SELECT (ts - :from - 1) / :size AS b, status / 100 AS c, COUNT(*) AS n, SUM(bytes) AS bytes,
-                       SUM(rt) AS rt_sum, COUNT(rt) AS rt_count
+        $sql = "SELECT (ts - :from - 1) / :size AS b, status / 100 AS c, COUNT(*) AS n, SUM(bytes) AS bytes
                 FROM requests WHERE $where GROUP BY b, c";
         foreach ($this->fetchAll($sql, $params + [':size' => $size]) as $row) {
             $b = (int) $row['b'];
             $family = (int) $row['c'];
             $byClass[$family >= 2 && $family <= 5 ? $family . 'xx' : 'other'][$b] += (int) $row['n'];
             $bytes[$b] += (int) $row['bytes'];
-            $timedSum[$b] += (float) $row['rt_sum'];
-            $timedCount[$b] += (int) $row['rt_count'];
         }
 
-        $rt = [];
-        for ($b = 0; $b < $buckets; $b++) {
-            $rt[] = $timedCount[$b] > 0 ? round($timedSum[$b] / $timedCount[$b], 4) : null;
-        }
-        return ['byStatusClass' => $byClass, 'bytes' => $bytes, 'rt' => $rt];
+        return ['byStatusClass' => $byClass, 'bytes' => $bytes];
     }
 
     /**

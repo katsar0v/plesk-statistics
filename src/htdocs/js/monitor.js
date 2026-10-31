@@ -77,7 +77,6 @@
             legendRequests: document.getElementById('ltm-legend-requests'),
             legendSites: document.getElementById('ltm-legend-sites'),
             footBandwidth: document.getElementById('ltm-foot-bandwidth'),
-            footRt: document.getElementById('ltm-foot-rt'),
             dockerPanel: document.getElementById('ltm-containers-panel'),
             containersNote: document.getElementById('ltm-containers-note'),
             dockerWarning: document.getElementById('ltm-docker-warning'),
@@ -107,7 +106,6 @@
             requests: createChart(document.getElementById('ltm-chart-requests'), 'stacked', rateUnits),
             bandwidth: createChart(document.getElementById('ltm-chart-bandwidth'), 'area', byteUnits),
             sites: createChart(document.getElementById('ltm-chart-sites'), 'lines', rateUnits),
-            rt: createChart(document.getElementById('ltm-chart-rt'), 'lines', durationUnits),
         };
 
         const state = {
@@ -728,11 +726,14 @@
                 return;
             }
             state.rowsKey = key;
+            // "Time taken" only when the log format records it; Plesk's default format doesn't.
+            const timed = rows.some((row) => typeof row.rt === 'number');
+            el.requests.parentNode.classList.toggle('ltm-no-rt', !timed);
 
             const fragment = document.createDocumentFragment();
             if (!rows.length) {
                 const td = h('td', 'ltm-empty', 'No requests in this window.');
-                td.colSpan = 8;
+                td.colSpan = 7;
                 const tr = h('tr');
                 tr.appendChild(td);
                 fragment.appendChild(tr);
@@ -746,7 +747,7 @@
                     cell('ltm-url ltm-mono', row.path || NO_VALUE, fullUrl(row)),
                     statusCell(row.status),
                     cell('ltm-mono', row.ip || NO_VALUE),
-                    cell('ltm-num', formatDuration(row.rt)),
+                    cell('ltm-num ltm-rt', formatDuration(row.rt)),
                     cell('ltm-num', formatBytes(row.bytes))
                 );
                 fragment.appendChild(tr);
@@ -821,7 +822,7 @@
 
         // --- Charts --------------------------------------------------------------------------------
 
-        // The four charts share the window's buckets (docs/data-contract.md, "timeline"). Y values are
+        // The charts share the window's buckets (docs/data-contract.md, "timeline"). Y values are
         // per second, so a scale means the same in every window.
         function renderCharts(p) {
             const t = p.timeline;
@@ -912,28 +913,6 @@
                 }),
             });
             syncRows(el.legendSites, legendRows, lines, 'domain', createSiteLegend, updateSiteLegend);
-
-            // Average response time; buckets where nothing was timed are gaps.
-            const timed = t.rt.filter((v) => typeof v === 'number');
-            charts.rt.update({
-                from: t.from,
-                bucket: bucket,
-                series: [{ tone: 'accent', values: t.rt }],
-                empty: timed.length ? ''
-                    : 'No response times in this window. Plesk\'s default log format doesn\'t record them.',
-                label: timed.length
-                    ? 'Average response time over the last ' + span + ', from ' + formatDuration(Math.min.apply(null, timed))
-                        + ' to ' + formatDuration(Math.max.apply(null, timed)) + '.'
-                    : 'No response times in this window.',
-                tooltip: (i) => ({
-                    title: range(i),
-                    rows: typeof t.rt[i] === 'number' ? [{ tone: 'accent', value: formatDuration(t.rt[i]), label: 'average' }] : [],
-                    foot: typeof t.rt[i] === 'number' ? '' : 'No timed requests',
-                }),
-            });
-            el.footRt.textContent = timed.length
-                ? 'Averages from ' + formatDuration(Math.min.apply(null, timed)) + ' to ' + formatDuration(Math.max.apply(null, timed))
-                : '';
         }
 
         // Colour slots 1..5 for the listed websites. A website keeps its slot while it stays listed, so a
@@ -1007,17 +986,14 @@
             return { factor: 1, suffix: '' };
         }
 
+        // The next unit from half of it on, so the axis reads "0 / 0.5 / 1 MB" rather than "1,000 KB".
         function byteUnits(max) {
             const units = ['B', 'KB', 'MB', 'GB', 'TB'];
             let i = 0;
-            while (max >= Math.pow(1024, i + 1) && i < units.length - 1) {
+            while (max >= Math.pow(1024, i + 1) / 2 && i < units.length - 1) {
                 i += 1;
             }
             return { factor: Math.pow(1024, i), suffix: ' ' + units[i] };
-        }
-
-        function durationUnits(max) {
-            return max >= 1 ? { factor: 1, suffix: ' s' } : { factor: 0.001, suffix: ' ms' };
         }
 
         // One SVG chart over a window's buckets. kind is 'stacked' (columns), 'area' (one series) or
@@ -1237,8 +1213,8 @@
             return nodes;
         }
 
-        // Lines (2px) with gaps where a value is null; a lone point between gaps is drawn as a dot. A single
-        // series also gets a light area wash. Dimmed series are drawn first, the selected one last.
+        // Lines (2px) with gaps where a value is missing; a lone point between gaps is drawn as a dot. A
+        // single series also gets a light area wash. Dimmed series are drawn first, the selected one last.
         function lines(geo, series) {
             const nodes = [];
             const order = series.filter((s) => s.dim).concat(series.filter((s) => !s.dim && !s.strong), series.filter((s) => s.strong));
