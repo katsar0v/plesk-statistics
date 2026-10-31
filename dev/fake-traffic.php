@@ -2,6 +2,8 @@
 /**
  * Appends realistic access-log lines (nginx/Apache "combined", timestamped now) to
  * dev/vhosts/system/<domain>/logs/{proxy_access_ssl_log,proxy_access_log,access_ssl_log,access_log}.
+ * The lines of example.com end with a request time (`0.123`, seconds), the way a customised log format
+ * records it; the other sites' lines have none, like Plesk's default format.
  *
  *   php dev/fake-traffic.php [rate=5] [duration=60] [--rotate] [--burst N]
  *
@@ -40,6 +42,7 @@ $duration = $positional[1] ?? ($burst > 0 ? 0.0 : 60.0);
 // --- Log files -------------------------------------------------------------------------------
 
 $domains = ['example.com', 'shop.example.net', 'blog.example.org', 'xn--80ak6aa92e.com'];
+const TIMED_DOMAIN = 'example.com';
 $files = [];
 $allLogs = [];
 foreach ($domains as $domain) {
@@ -129,9 +132,21 @@ function random_path(string $server): string
     };
 }
 
-function log_line(string $ip, string $request, int $status, int $bytes, string $referer, string $agent): string
+/** Seconds: mostly 5-800 ms, now and then a slow one. */
+function random_request_time(): float
 {
-    return sprintf('%s - - [%s] "%s" %d %d "%s" "%s"' . "\n", $ip, gmdate('d/M/Y:H:i:s O'), $request, $status, $bytes, $referer, $agent);
+    return (mt_rand(1, 100) <= 4 ? mt_rand(1500, 4500) : mt_rand(5, 800)) / 1000;
+}
+
+/** The unquoted request-time field that closes a line of the timed site (see LogParser). */
+function request_time_field(?float $rt): string
+{
+    return $rt === null ? '' : sprintf(' %.3f', $rt);
+}
+
+function log_line(string $ip, string $request, int $status, int $bytes, string $referer, string $agent, ?float $rt = null): string
+{
+    return sprintf('%s - - [%s] "%s" %d %d "%s" "%s"%s' . "\n", $ip, gmdate('d/M/Y:H:i:s O'), $request, $status, $bytes, $referer, $agent, request_time_field($rt));
 }
 
 /** Appends one request (or the X-Accel pair) to the right log files. Returns the number of lines written. */
@@ -145,19 +160,21 @@ function write_request(array $files): int
     $ip = random_ip();
     $referer = pick(REFERERS);
     $agent = pick(AGENTS);
+    $timed = $domain === TIMED_DOMAIN;
+    $time = static fn (): ?float => $timed ? random_request_time() : null;
 
     // Plesk's X-Accel pattern: Apache logs the static file it hands back, then nginx logs what the client got.
     if (mt_rand(1, 100) <= 15) {
         $file = pick(STATIC_FILES);
         $cached = mt_rand(0, 1) === 1;
-        write_line($apacheLog, log_line($ip, "GET $file HTTP/1.1", 200, 5533, $referer, $agent));
-        write_line($nginxLog, log_line($ip, "GET $file " . pick(['HTTP/2.0', 'HTTP/3.0']), $cached ? 304 : 200, $cached ? 0 : 5533, $referer, $agent));
+        write_line($apacheLog, log_line($ip, "GET $file HTTP/1.1", 200, 5533, $referer, $agent, $time()));
+        write_line($nginxLog, log_line($ip, "GET $file " . pick(['HTTP/2.0', 'HTTP/3.0']), $cached ? 304 : 200, $cached ? 0 : 5533, $referer, $agent, $time()));
         return 2;
     }
 
     // Malformed request: a TLS handshake sent to the plain-HTTP port.
     if (mt_rand(1, 100) <= 2) {
-        write_line($nginxLog, sprintf('%s - - [%s] "\x16\x03\x01" 400 157 "-" "-"' . "\n", $ip, gmdate('d/M/Y:H:i:s O')));
+        write_line($nginxLog, sprintf('%s - - [%s] "\x16\x03\x01" 400 157 "-" "-"%s' . "\n", $ip, gmdate('d/M/Y:H:i:s O'), request_time_field($time())));
         return 1;
     }
 
@@ -170,7 +187,7 @@ function write_request(array $files): int
         $status >= 300 => mt_rand(150, 400),
         default => mt_rand(0, 6) === 0 ? mt_rand(200000, 12000000) : mt_rand(300, 90000),
     };
-    write_line($server === 'nginx' ? $nginxLog : $apacheLog, log_line($ip, "$method " . random_path($server) . " $protocol", $status, $bytes, $referer, $agent));
+    write_line($server === 'nginx' ? $nginxLog : $apacheLog, log_line($ip, "$method " . random_path($server) . " $protocol", $status, $bytes, $referer, $agent, $time()));
     return 1;
 }
 

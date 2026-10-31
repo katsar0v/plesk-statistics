@@ -3,6 +3,7 @@
 namespace LiveTrafficMonitor\Tests;
 
 use Modules_LiveTrafficMonitor_Monitor as Monitor;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 final class MonitorTest extends TestCase
 {
@@ -25,6 +26,30 @@ final class MonitorTest extends TestCase
     private function monitor(array $options = []): Monitor
     {
         return new Monitor($this->dir . '/state', $options);
+    }
+
+    /** A line that ends with a request time in seconds, as customised log formats write it. */
+    private static function timedLine(int $ts, float $rt, string $request = 'GET / HTTP/1.1', int $status = 200, int $bytes = 100): string
+    {
+        return rtrim(self::line($ts, $request, $status, '203.0.113.7', $bytes), "\n") . sprintf(' %.3f', $rt) . "\n";
+    }
+
+    /** @param array<string, mixed> $timeline */
+    private static function assertTimelineShape(array $timeline, int $window): void
+    {
+        self::assertSame(['from', 'bucket', 'byStatusClass', 'bytes', 'rt', 'byDomain'], array_keys($timeline));
+        self::assertSame(self::NOW - $window, $timeline['from']);
+        self::assertSame($window / 30, $timeline['bucket']);
+        self::assertSame(['2xx', '3xx', '4xx', '5xx', 'other'], array_keys($timeline['byStatusClass']));
+        foreach ($timeline['byStatusClass'] as $counts) {
+            self::assertCount(30, $counts);
+        }
+        self::assertCount(30, $timeline['bytes']);
+        self::assertCount(30, $timeline['rt']);
+        foreach ($timeline['byDomain'] as $series) {
+            self::assertSame(['domain', 'counts'], array_keys($series));
+            self::assertCount(30, $series['counts']);
+        }
     }
 
     public function testRollingWindowsCountRequestsInsideEachWindow(): void
@@ -88,6 +113,10 @@ final class MonitorTest extends TestCase
         ], $r['rows'][3]);
         self::assertSame([], $r['byContainer']);
         self::assertNull($r['docker']);
+        self::assertTimelineShape($r['timeline'], 60);
+        self::assertSame(1234 + 3 * 100, array_sum($r['timeline']['bytes']));
+        self::assertSame([['domain' => 'xn--80ak6aa92e.com', 'counts' => array_replace(array_fill(0, 30, 0), [28 => 2, 29 => 2])]], $r['timeline']['byDomain']);
+        self::assertSame(array_fill(0, 30, null), $r['timeline']['rt']);
         self::assertFalse($r['truncated']);
         self::assertFalse($r['lagging']);
         self::assertSame(['read' => 2, 'unreadable' => 0], $r['files']);
@@ -342,6 +371,220 @@ final class MonitorTest extends TestCase
             ['container' => 'new', 'image' => 'new:1', 'state' => 'created', 'health' => null, 'status' => null,
                 'domains' => ['a.com'], 'count' => 0, 'errors' => 0],
         ], $r['byContainer']);
+    }
+
+    /** @return array<string, array{int, int}> */
+    public static function windows(): array
+    {
+        return ['one minute' => [60, 2], 'two minutes' => [120, 4], 'five minutes' => [300, 10]];
+    }
+
+    #[DataProvider('windows')]
+    public function testTimelineHasThirtyBucketsOfWindowOverThirtySeconds(int $window, int $bucket): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log', self::line(self::NOW - 1));
+
+        $timeline = $this->monitor()->poll([$site], $window, null, self::NOW)['timeline'];
+
+        self::assertTimelineShape($timeline, $window);
+        self::assertSame($bucket, $timeline['bucket']);
+        self::assertSame(self::NOW - $window, $timeline['from']);
+    }
+
+    public function testTimelineWithoutRequestsIsFilledWithZerosAndNulls(): void
+    {
+        $timeline = $this->monitor()->poll([$this->site('a.com')], 120, null, self::NOW)['timeline'];
+
+        self::assertTimelineShape($timeline, 120);
+        foreach ($timeline['byStatusClass'] as $counts) {
+            self::assertSame(array_fill(0, 30, 0), $counts);
+        }
+        self::assertSame(array_fill(0, 30, 0), $timeline['bytes']);
+        self::assertSame(array_fill(0, 30, null), $timeline['rt']);
+        self::assertSame([], $timeline['byDomain']);
+    }
+
+    #[DataProvider('windows')]
+    public function testTimelineBucketsIncludeTheirEndAndExcludeTheirStart(int $window, int $bucket): void
+    {
+        $from = self::NOW - $window;
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log',
+            self::line($from), // exactly `window` old: outside, like in every other count
+            self::line($from + 1), // first second of bucket 0
+            self::line($from + $bucket), // last second of bucket 0
+            self::line($from + $bucket + 1), // first second of bucket 1
+            self::line($from + 2 * $bucket), // last second of bucket 1
+            self::line(self::NOW - 1),
+            self::line(self::NOW) // last second of bucket 29
+        );
+
+        $r = $this->monitor()->poll([$site], $window, null, self::NOW);
+
+        $expected = array_fill(0, 30, 0);
+        $expected[0] = 2;
+        $expected[1] = 2;
+        $expected[29] = 2;
+        self::assertSame(6, $r['total']);
+        self::assertSame($expected, $r['timeline']['byStatusClass']['2xx']);
+        self::assertSame($expected, $r['timeline']['byDomain'][0]['counts']);
+        self::assertSame(array_map(static fn (int $n): int => $n * 100, $expected), $r['timeline']['bytes']);
+    }
+
+    public function testTimelineStatusClassesAddUpToTheTotalAndBytesAreSummed(): void
+    {
+        $site = $this->site('a.com');
+        $from = self::NOW - 60;
+        $this->append($site, 'proxy_access_ssl_log',
+            self::line($from + 2, 'GET / HTTP/2.0', 200, '203.0.113.7', 1000),
+            self::line($from + 2, 'GET /a HTTP/2.0', 206, '203.0.113.7', 500),
+            self::line($from + 3, 'GET /b HTTP/2.0', 301, '203.0.113.7', 300),
+            self::line($from + 30, 'GET /c HTTP/2.0', 404, '203.0.113.7', 40),
+            self::line($from + 31, 'GET /d HTTP/2.0', 499, '203.0.113.7', 0),
+            self::line(self::NOW, 'GET /e HTTP/2.0', 503, '203.0.113.7', 7),
+            self::line(self::NOW, 'GET /f HTTP/2.0', 100, '203.0.113.7', 1)
+        );
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW);
+        $timeline = $r['timeline'];
+
+        $at = static fn (array $indexes): array => array_replace(array_fill(0, 30, 0), $indexes);
+        self::assertSame($at([0 => 2]), $timeline['byStatusClass']['2xx']);
+        self::assertSame($at([1 => 1]), $timeline['byStatusClass']['3xx']);
+        self::assertSame($at([14 => 1, 15 => 1]), $timeline['byStatusClass']['4xx']);
+        self::assertSame($at([29 => 1]), $timeline['byStatusClass']['5xx']);
+        self::assertSame($at([29 => 1]), $timeline['byStatusClass']['other']);
+        self::assertSame($at([0 => 1500, 1 => 300, 14 => 40, 29 => 8]), $timeline['bytes']);
+        self::assertSame(7, $r['total']);
+        self::assertSame($r['total'], array_sum(array_map('array_sum', $timeline['byStatusClass'])));
+        foreach ($r['byStatusClass'] as $class => $count) {
+            self::assertSame($count, array_sum($timeline['byStatusClass'][$class]));
+        }
+    }
+
+    public function testTimelineResponseTimeIsTheAverageOfTheTimedRequests(): void
+    {
+        $site = $this->site('a.com');
+        $from = self::NOW - 60;
+        $this->append($site, 'proxy_access_ssl_log',
+            self::timedLine($from + 2, 0.1),
+            self::timedLine($from + 2, 0.3),
+            self::line($from + 1), // not timed: neither counts nor dilutes the average
+            self::timedLine($from + 3, 1.5),
+            self::line($from + 5), // a bucket where nothing was timed
+            self::timedLine($from + 7, 0.1),
+            self::timedLine($from + 7, 0.2),
+            self::timedLine($from + 8, 0.2),
+            self::timedLine(self::NOW, 0.0)
+        );
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW);
+
+        $expected = array_fill(0, 30, null);
+        $expected[0] = 0.2;
+        $expected[1] = 1.5;
+        $expected[3] = round((0.1 + 0.2 + 0.2) / 3, 4);
+        $expected[29] = 0.0;
+        self::assertSame($expected, $r['timeline']['rt']);
+        self::assertSame(0.1667, $r['timeline']['rt'][3]);
+        self::assertSame($r['total'], array_sum($r['timeline']['byStatusClass']['2xx']));
+    }
+
+    public function testTimelineSeriesFollowTheDomainFilterButItsByDomainDoesNot(): void
+    {
+        $a = $this->site('a.com');
+        $b = $this->site('b.com');
+        $from = self::NOW - 60;
+        $this->append($a, 'proxy_access_ssl_log', self::timedLine($from + 2, 2.0, 'GET / HTTP/2.0', 200, 1000), self::line($from + 2));
+        $this->append($b, 'proxy_access_ssl_log',
+            self::timedLine($from + 2, 0.5, 'GET /x HTTP/2.0', 500, 30),
+            self::timedLine(self::NOW, 0.25, 'GET /y HTTP/2.0', 404, 7)
+        );
+
+        $r = $this->monitor()->poll([$a, $b], 60, 'b.com', self::NOW);
+        $timeline = $r['timeline'];
+
+        $at = static fn (array $indexes, mixed $fill = 0): array => array_replace(array_fill(0, 30, $fill), $indexes);
+        self::assertSame(2, $r['total']);
+        self::assertSame($at([]), $timeline['byStatusClass']['2xx']);
+        self::assertSame($at([29 => 1]), $timeline['byStatusClass']['4xx']);
+        self::assertSame($at([0 => 1]), $timeline['byStatusClass']['5xx']);
+        self::assertSame($at([0 => 30, 29 => 7]), $timeline['bytes']);
+        self::assertSame($at([0 => 0.5, 29 => 0.25], null), $timeline['rt']);
+        self::assertSame([
+            ['domain' => 'a.com', 'counts' => $at([0 => 2])],
+            ['domain' => 'b.com', 'counts' => $at([0 => 1, 29 => 1])],
+        ], $timeline['byDomain']);
+    }
+
+    public function testTimelineSeriesFollowTheContainerFilterButItsByDomainDoesNot(): void
+    {
+        $site = $this->site('a.com');
+        $from = self::NOW - 60;
+        $this->append($site, 'proxy_access_ssl_log',
+            self::timedLine($from + 2, 0.4, 'GET /api/a HTTP/2.0', 200, 50),
+            self::timedLine($from + 4, 0.6, 'GET /api/b HTTP/2.0', 503, 25),
+            self::timedLine($from + 4, 3.0, 'GET / HTTP/2.0', 200, 1000)
+        );
+        $docker = self::docker([
+            ['prefix' => '/api', 'container' => 'api', 'schemes' => ['https']],
+            ['prefix' => '/', 'container' => 'web', 'schemes' => ['https']],
+        ], ['web' => 'running', 'api' => 'running']);
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW, $docker, 'api');
+        $timeline = $r['timeline'];
+
+        $at = static fn (array $indexes, mixed $fill = 0): array => array_replace(array_fill(0, 30, $fill), $indexes);
+        self::assertSame(2, $r['total']);
+        self::assertSame($at([0 => 1]), $timeline['byStatusClass']['2xx']);
+        self::assertSame($at([1 => 1]), $timeline['byStatusClass']['5xx']);
+        self::assertSame($at([0 => 50, 1 => 25]), $timeline['bytes']);
+        self::assertSame($at([0 => 0.4, 1 => 0.6], null), $timeline['rt']);
+        self::assertSame([['domain' => 'a.com', 'counts' => $at([0 => 1, 1 => 2])]], $timeline['byDomain']);
+    }
+
+    public function testTimelineByDomainListsOnlyTheFiveBusiestWebsitesInTheOrderOfByDomain(): void
+    {
+        // Counts: busy 5, a-d 3 each (a tie, broken by name), e 3 (the tie's sixth), f 1.
+        $counts = ['busy.com' => 5, 'e.com' => 3, 'd.com' => 3, 'c.com' => 3, 'b.com' => 3, 'a.com' => 3, 'f.com' => 1];
+        $sites = [];
+        foreach ($counts as $name => $n) {
+            $site = $sites[] = $this->site($name);
+            $lines = [];
+            for ($i = 0; $i < $n; $i++) {
+                $lines[] = self::line(self::NOW - $i);
+            }
+            $this->append($site, 'proxy_access_ssl_log', ...$lines);
+        }
+
+        $r = $this->monitor()->poll($sites, 60, 'f.com', self::NOW);
+
+        self::assertSame(['busy.com', 'a.com', 'b.com', 'c.com', 'd.com'], array_column($r['timeline']['byDomain'], 'domain'));
+        self::assertSame(array_slice(array_column($r['byDomain'], 'domain'), 0, 5), array_column($r['timeline']['byDomain'], 'domain'));
+        self::assertSame(
+            [5, 3, 3, 3, 3],
+            array_map(static fn (array $series): int => array_sum($series['counts']), $r['timeline']['byDomain'])
+        );
+        self::assertSame(array_replace(array_fill(0, 30, 0), [27 => 1, 28 => 2, 29 => 2]), $r['timeline']['byDomain'][0]['counts']);
+        // The filter (f.com, which is not among the five) changes the totals but not this list.
+        self::assertSame(1, $r['total']);
+        self::assertSame(1, array_sum($r['timeline']['byStatusClass']['2xx']));
+    }
+
+    public function testTimelineLeavesOutApacheDuplicates(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'access_ssl_log', self::line(self::NOW - 4, 'GET /f.css HTTP/1.1', 200, '85.118.76.145', 5533));
+        $this->append($site, 'proxy_access_ssl_log', self::line(self::NOW - 4, 'GET /f.css HTTP/3.0', 304, '85.118.76.145', 0));
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW);
+
+        self::assertSame(1, $r['total']);
+        self::assertSame(1, array_sum($r['timeline']['byStatusClass']['3xx']));
+        self::assertSame(0, array_sum($r['timeline']['byStatusClass']['2xx']));
+        self::assertSame(0, array_sum($r['timeline']['bytes']));
+        self::assertSame(1, array_sum($r['timeline']['byDomain'][0]['counts']));
     }
 
     public function testStateDirectoryIsPrivate(): void

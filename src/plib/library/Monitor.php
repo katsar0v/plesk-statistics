@@ -19,6 +19,8 @@ class Modules_LiveTrafficMonitor_Monitor
     public const WINDOWS = [60, 120, 300];
     /** Seconds of requests kept in the store. */
     public const RETENTION = 600;
+    /** Slices of the window in the timeline, whatever the window is. */
+    public const TIMELINE_BUCKETS = 30;
     /** Seconds before the largest window to start from on a fresh read; log lines are not strictly ordered. */
     private const START_MARGIN = 30;
 
@@ -71,7 +73,7 @@ class Modules_LiveTrafficMonitor_Monitor
         $now ??= time();
         $store = $this->openStore();
         $ingest = $this->ingest($store, $sites, $now, $docker['routes'] ?? []);
-        $result = $store->query($window, $domain, $now, $this->options['rowLimit'], $container);
+        $result = $store->query($window, $domain, $now, $this->options['rowLimit'], $container, self::TIMELINE_BUCKETS);
 
         $displayNames = array_column($sites, 'displayName', 'name');
         foreach ($result['byDomain'] as &$entry) {
@@ -92,6 +94,7 @@ class Modules_LiveTrafficMonitor_Monitor
             'byDomain' => $result['byDomain'],
             'byContainer' => self::byContainer($result['byContainer'], $docker),
             'docker' => $docker === null ? null : ['available' => (bool) $docker['available'], 'error' => $docker['error']],
+            'timeline' => $result['timeline'],
             'rows' => $result['rows'],
             'rowLimit' => $this->options['rowLimit'],
             'truncated' => $result['total'] > count($result['rows']),
