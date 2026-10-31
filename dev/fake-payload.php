@@ -167,21 +167,11 @@ function ltm_fake_timeline(array $all, array $matching, array $byDomain, int $no
         $byStatusClass[$class] = array_fill(0, $buckets, 0);
     }
     $bytes = array_fill(0, $buckets, 0);
-    $timedSum = array_fill(0, $buckets, 0.0);
-    $timedCount = array_fill(0, $buckets, 0);
     foreach ($matching as $row) {
         $i = $slice($row);
         $family = intdiv($row['status'], 100);
         $byStatusClass[$family >= 2 && $family <= 5 ? $family . 'xx' : 'other'][$i]++;
         $bytes[$i] += $row['bytes'];
-        if ($row['rt'] !== null) {
-            $timedSum[$i] += $row['rt'];
-            $timedCount[$i]++;
-        }
-    }
-    $rt = [];
-    foreach ($timedCount as $i => $count) {
-        $rt[] = $count > 0 ? round($timedSum[$i] / $count, 4) : null;
     }
 
     $busiest = array_column(array_slice(array_filter($byDomain, static fn (array $d): bool => $d['count'] > 0), 0, 5), 'domain');
@@ -200,7 +190,6 @@ function ltm_fake_timeline(array $all, array $matching, array $byDomain, int $no
         'bucket' => $size,
         'byStatusClass' => $byStatusClass,
         'bytes' => $bytes,
-        'rt' => $rt,
         'byDomain' => array_values($domains),
     ];
 }

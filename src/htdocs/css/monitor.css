@@ -327,6 +327,10 @@ html[data-theme="dark"] .ltm {
     flex-direction: column;
 }
 
+.ltm .ltm-panel--wide {
+    grid-column: 1 / -1;
+}
+
 .ltm .ltm-chart {
     position: relative;
     height: 180px;
@@ -596,6 +600,11 @@ html[data-theme="dark"] .ltm {
 
 .ltm .ltm-table--requests {
     min-width: 54rem;
+}
+
+/* "Time taken" is hidden while no listed request has a response time (Plesk's default log format). */
+.ltm .ltm-table--requests.ltm-no-rt .ltm-rt {
+    display: none;
 }
 
 .ltm .ltm-table th,

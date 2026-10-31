@@ -37,7 +37,7 @@ final class MonitorTest extends TestCase
     /** @param array<string, mixed> $timeline */
     private static function assertTimelineShape(array $timeline, int $window): void
     {
-        self::assertSame(['from', 'bucket', 'byStatusClass', 'bytes', 'rt', 'byDomain'], array_keys($timeline));
+        self::assertSame(['from', 'bucket', 'byStatusClass', 'bytes', 'byDomain'], array_keys($timeline));
         self::assertSame(self::NOW - $window, $timeline['from']);
         self::assertSame($window / 30, $timeline['bucket']);
         self::assertSame(['2xx', '3xx', '4xx', '5xx', 'other'], array_keys($timeline['byStatusClass']));
@@ -45,7 +45,6 @@ final class MonitorTest extends TestCase
             self::assertCount(30, $counts);
         }
         self::assertCount(30, $timeline['bytes']);
-        self::assertCount(30, $timeline['rt']);
         foreach ($timeline['byDomain'] as $series) {
             self::assertSame(['domain', 'counts'], array_keys($series));
             self::assertCount(30, $series['counts']);
@@ -116,7 +115,6 @@ final class MonitorTest extends TestCase
         self::assertTimelineShape($r['timeline'], 60);
         self::assertSame(1234 + 3 * 100, array_sum($r['timeline']['bytes']));
         self::assertSame([['domain' => 'xn--80ak6aa92e.com', 'counts' => array_replace(array_fill(0, 30, 0), [28 => 2, 29 => 2])]], $r['timeline']['byDomain']);
-        self::assertSame(array_fill(0, 30, null), $r['timeline']['rt']);
         self::assertFalse($r['truncated']);
         self::assertFalse($r['lagging']);
         self::assertSame(['read' => 2, 'unreadable' => 0], $r['files']);
@@ -392,7 +390,31 @@ final class MonitorTest extends TestCase
         self::assertSame(self::NOW - $window, $timeline['from']);
     }
 
-    public function testTimelineWithoutRequestsIsFilledWithZerosAndNulls(): void
+    public function testTimelineHasExactlyTheDocumentedKeys(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log', self::timedLine(self::NOW - 1, 0.25));
+        $monitor = $this->monitor();
+
+        foreach ([$monitor->poll([$site], 60, null, self::NOW), $monitor->poll([$this->site('b.com')], 60, null, self::NOW)] as $r) {
+            self::assertSame(['from', 'bucket', 'byStatusClass', 'bytes', 'byDomain'], array_keys($r['timeline']));
+        }
+    }
+
+    public function testRowsCarryTheResponseTimeWhenTheLogRecordsOne(): void
+    {
+        $site = $this->site('a.com');
+        $this->append($site, 'proxy_access_ssl_log',
+            self::timedLine(self::NOW - 2, 0.123),
+            self::line(self::NOW - 1)
+        );
+
+        $r = $this->monitor()->poll([$site], 60, null, self::NOW);
+
+        self::assertSame([null, 0.123], array_column($r['rows'], 'rt'));
+    }
+
+    public function testTimelineWithoutRequestsIsFilledWithZeros(): void
     {
         $timeline = $this->monitor()->poll([$this->site('a.com')], 120, null, self::NOW)['timeline'];
 
@@ -401,7 +423,6 @@ final class MonitorTest extends TestCase
             self::assertSame(array_fill(0, 30, 0), $counts);
         }
         self::assertSame(array_fill(0, 30, 0), $timeline['bytes']);
-        self::assertSame(array_fill(0, 30, null), $timeline['rt']);
         self::assertSame([], $timeline['byDomain']);
     }
 
@@ -463,43 +484,15 @@ final class MonitorTest extends TestCase
         }
     }
 
-    public function testTimelineResponseTimeIsTheAverageOfTheTimedRequests(): void
-    {
-        $site = $this->site('a.com');
-        $from = self::NOW - 60;
-        $this->append($site, 'proxy_access_ssl_log',
-            self::timedLine($from + 2, 0.1),
-            self::timedLine($from + 2, 0.3),
-            self::line($from + 1), // not timed: neither counts nor dilutes the average
-            self::timedLine($from + 3, 1.5),
-            self::line($from + 5), // a bucket where nothing was timed
-            self::timedLine($from + 7, 0.1),
-            self::timedLine($from + 7, 0.2),
-            self::timedLine($from + 8, 0.2),
-            self::timedLine(self::NOW, 0.0)
-        );
-
-        $r = $this->monitor()->poll([$site], 60, null, self::NOW);
-
-        $expected = array_fill(0, 30, null);
-        $expected[0] = 0.2;
-        $expected[1] = 1.5;
-        $expected[3] = round((0.1 + 0.2 + 0.2) / 3, 4);
-        $expected[29] = 0.0;
-        self::assertSame($expected, $r['timeline']['rt']);
-        self::assertSame(0.1667, $r['timeline']['rt'][3]);
-        self::assertSame($r['total'], array_sum($r['timeline']['byStatusClass']['2xx']));
-    }
-
     public function testTimelineSeriesFollowTheDomainFilterButItsByDomainDoesNot(): void
     {
         $a = $this->site('a.com');
         $b = $this->site('b.com');
         $from = self::NOW - 60;
-        $this->append($a, 'proxy_access_ssl_log', self::timedLine($from + 2, 2.0, 'GET / HTTP/2.0', 200, 1000), self::line($from + 2));
+        $this->append($a, 'proxy_access_ssl_log', self::line($from + 2, 'GET / HTTP/2.0', 200, '203.0.113.7', 1000), self::line($from + 2));
         $this->append($b, 'proxy_access_ssl_log',
-            self::timedLine($from + 2, 0.5, 'GET /x HTTP/2.0', 500, 30),
-            self::timedLine(self::NOW, 0.25, 'GET /y HTTP/2.0', 404, 7)
+            self::line($from + 2, 'GET /x HTTP/2.0', 500, '203.0.113.7', 30),
+            self::line(self::NOW, 'GET /y HTTP/2.0', 404, '203.0.113.7', 7)
         );
 
         $r = $this->monitor()->poll([$a, $b], 60, 'b.com', self::NOW);
@@ -511,7 +504,6 @@ final class MonitorTest extends TestCase
         self::assertSame($at([29 => 1]), $timeline['byStatusClass']['4xx']);
         self::assertSame($at([0 => 1]), $timeline['byStatusClass']['5xx']);
         self::assertSame($at([0 => 30, 29 => 7]), $timeline['bytes']);
-        self::assertSame($at([0 => 0.5, 29 => 0.25], null), $timeline['rt']);
         self::assertSame([
             ['domain' => 'a.com', 'counts' => $at([0 => 2])],
             ['domain' => 'b.com', 'counts' => $at([0 => 1, 29 => 1])],
@@ -523,9 +515,9 @@ final class MonitorTest extends TestCase
         $site = $this->site('a.com');
         $from = self::NOW - 60;
         $this->append($site, 'proxy_access_ssl_log',
-            self::timedLine($from + 2, 0.4, 'GET /api/a HTTP/2.0', 200, 50),
-            self::timedLine($from + 4, 0.6, 'GET /api/b HTTP/2.0', 503, 25),
-            self::timedLine($from + 4, 3.0, 'GET / HTTP/2.0', 200, 1000)
+            self::line($from + 2, 'GET /api/a HTTP/2.0', 200, '203.0.113.7', 50),
+            self::line($from + 4, 'GET /api/b HTTP/2.0', 503, '203.0.113.7', 25),
+            self::line($from + 4, 'GET / HTTP/2.0', 200, '203.0.113.7', 1000)
         );
         $docker = self::docker([
             ['prefix' => '/api', 'container' => 'api', 'schemes' => ['https']],
@@ -540,7 +532,6 @@ final class MonitorTest extends TestCase
         self::assertSame($at([0 => 1]), $timeline['byStatusClass']['2xx']);
         self::assertSame($at([1 => 1]), $timeline['byStatusClass']['5xx']);
         self::assertSame($at([0 => 50, 1 => 25]), $timeline['bytes']);
-        self::assertSame($at([0 => 0.4, 1 => 0.6], null), $timeline['rt']);
         self::assertSame([['domain' => 'a.com', 'counts' => $at([0 => 1, 1 => 2])]], $timeline['byDomain']);
     }
 

@@ -78,7 +78,6 @@ Success (HTTP 200):
       "other": [0, 0, 0]
     },
     "bytes": [51200, 80300, 640],
-    "rt": [0.0412, null, 0.2305],
     "byDomain": [{"domain": "example.com", "counts": [2, 3, 0]}]
   },
   "rows": [
@@ -120,13 +119,10 @@ The fields mean:
     10). Bucket `i` holds the requests with `from + i * bucket < ts <= from + (i + 1) * bucket`, so the
     last bucket ends at `generatedAt`. Every array has exactly 30 entries; the example above shows only
     the first three of each.
-  - `byStatusClass`, `bytes` and `rt` apply the window and the domain and container filters, like
+  - `byStatusClass` and `bytes` apply the window and the domain and container filters, like
     `total`. `byStatusClass` has the same five keys as the top-level one, each with the requests per
     bucket; adding up all buckets and classes gives `total`.
   - `bytes` is the sum of the response bytes per bucket.
-  - `rt` is the average response time in seconds per bucket, over the requests that have one. It is
-    `null` for a bucket where no request recorded a response time, which is every bucket when the log
-    format doesn't record it.
   - `byDomain` has the requests per bucket of the 5 busiest websites, in the order of the top-level
     `byDomain`. It applies only the window, so it doesn't change with the filters. It is empty when
     there are no requests in the window.
