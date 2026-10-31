@@ -49,8 +49,17 @@
             503: 'Service Unavailable', 504: 'Gateway Timeout',
         };
 
+        // Charts: the status classes bottom to top, and the colour slots of the website lines.
+        const SVG_NS = 'http://www.w3.org/2000/svg';
+        const STATUS_CLASSES = ['2xx', '3xx', '4xx', '5xx', 'other'];
+        const CLASS_LABELS = {
+            '2xx': '2xx Success', '3xx': '3xx Redirect', '4xx': '4xx Client error', '5xx': '5xx Server error', other: 'Other',
+        };
+        const SITE_SLOTS = 5;
+
         const numberFormat = new Intl.NumberFormat();
         const rateFormat = new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const axisFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 
         // --- Setup ---------------------------------------------------------------------------------
 
@@ -64,7 +73,13 @@
             content: document.getElementById('ltm-content'),
             sites: document.getElementById('ltm-sites'),
             statuses: document.getElementById('ltm-statuses'),
+            charts: document.getElementById('ltm-charts'),
+            legendRequests: document.getElementById('ltm-legend-requests'),
+            legendSites: document.getElementById('ltm-legend-sites'),
+            footBandwidth: document.getElementById('ltm-foot-bandwidth'),
+            footRt: document.getElementById('ltm-foot-rt'),
             dockerPanel: document.getElementById('ltm-containers-panel'),
+            containersNote: document.getElementById('ltm-containers-note'),
             dockerWarning: document.getElementById('ltm-docker-warning'),
             containers: document.getElementById('ltm-containers'),
             requests: document.getElementById('ltm-requests'),
@@ -86,6 +101,14 @@
         });
         const siteRows = new Map();
         const containerRows = new Map();
+        const legendRows = new Map();
+        const siteSlots = new Map(); // domain -> colour slot of its line; a website keeps its colour while it stays listed
+        const charts = {
+            requests: createChart(document.getElementById('ltm-chart-requests'), 'stacked', rateUnits),
+            bandwidth: createChart(document.getElementById('ltm-chart-bandwidth'), 'area', byteUnits),
+            sites: createChart(document.getElementById('ltm-chart-sites'), 'lines', rateUnits),
+            rt: createChart(document.getElementById('ltm-chart-rt'), 'lines', durationUnits),
+        };
 
         const state = {
             windowSec: config.defaultWindow,
@@ -102,6 +125,8 @@
 
         // Shown from the start only when there is something to show; each payload then decides.
         el.dockerPanel.hidden = !config.containers.length;
+        // Closed unless the administrator opened it last time; the header still says when something is wrong.
+        el.dockerPanel.open = storageGet('containersOpen') === '1';
 
         restoreFilters();
         buildControls();
@@ -234,6 +259,16 @@
                 }
                 // The "All websites" row clears the container filter too.
                 setFilters(row.dataset.domain === 'all' ? { domain: 'all', container: 'all' } : { domain: row.dataset.domain });
+            });
+            el.legendSites.addEventListener('click', (event) => {
+                const button = event.target.closest('button[data-domain]');
+                if (button) {
+                    // Clicking the selected website again goes back to all websites.
+                    setFilters({ domain: button.dataset.domain === state.domain ? 'all' : button.dataset.domain });
+                }
+            });
+            el.dockerPanel.addEventListener('toggle', () => {
+                storageSet('containersOpen', el.dockerPanel.open ? '1' : '0');
             });
             el.containers.addEventListener('click', (event) => {
                 const row = event.target.closest('tr[data-container]');
@@ -407,6 +442,7 @@
                 }
             });
             renderSummary(p);
+            renderCharts(p);
             renderSites(p);
             renderStatuses(p);
             renderContainers(p);
@@ -569,6 +605,7 @@
                 el.dockerWarning.textContent = warning;
             }
             el.dockerWarning.hidden = !warning;
+            renderContainersNote(p);
 
             const wanted = (p.byContainer || []).map((c) => ({
                 container: c.container,
@@ -631,6 +668,36 @@
             row.countCell.textContent = numberFormat.format(c.count);
             row.errorsCell.textContent = numberFormat.format(c.errors);
             row.errorsCell.classList.toggle('ltm-err', c.errors > 0);
+        }
+
+        // The closed accordion's header: how many containers, and whether any of them needs a look.
+        function renderContainersNote(p) {
+            const list = p.byContainer || [];
+            const parts = [plural(list.length, 'container')];
+            let tone = '';
+            if (p.docker.available === false) {
+                parts.push('Docker not reachable');
+                tone = 'warn';
+            } else {
+                let stopped = 0;
+                let unhealthy = 0;
+                list.forEach((c) => {
+                    if (c.state !== 'running') {
+                        stopped += 1;
+                    } else if (c.health === 'unhealthy') {
+                        unhealthy += 1;
+                    }
+                });
+                if (stopped) {
+                    parts.push(numberFormat.format(stopped) + ' not running');
+                }
+                if (unhealthy) {
+                    parts.push(numberFormat.format(unhealthy) + ' unhealthy');
+                }
+                tone = stopped || unhealthy ? 'bad' : '';
+            }
+            el.containersNote.textContent = parts.join(' · ');
+            el.containersNote.dataset.tone = tone;
         }
 
         // Label and colour of a container's state. The label carries the meaning; the dot only echoes it.
@@ -750,6 +817,538 @@
                 items.push(['ltm-flag', plural(unreadable, 'log file') + ' could not be read']);
             }
             el.footer.replaceChildren(...items.map((item) => h('span', item[0], item[1])));
+        }
+
+        // --- Charts --------------------------------------------------------------------------------
+
+        // The four charts share the window's buckets (docs/data-contract.md, "timeline"). Y values are
+        // per second, so a scale means the same in every window.
+        function renderCharts(p) {
+            const t = p.timeline;
+            el.charts.hidden = !t;
+            if (!t) {
+                return;
+            }
+            const n = t.bytes.length;
+            const bucket = t.bucket;
+            const span = formatWindow(n * bucket);
+            const totals = new Array(n).fill(0);
+            STATUS_CLASSES.forEach((name) => {
+                (t.byStatusClass[name] || []).forEach((count, i) => {
+                    totals[i] += count;
+                });
+            });
+            const total = sum(totals);
+            const noRequests = total ? '' : 'No requests in this window.';
+            const range = (i) => formatClock(t.from + i * bucket) + ' – ' + formatClock(t.from + (i + 1) * bucket);
+
+            // Requests per second by status. "Other" (1xx, invalid) only appears when there is some.
+            const classes = STATUS_CLASSES
+                .filter((name) => name !== 'other' || sum(t.byStatusClass.other || []) > 0)
+                .map((name) => ({ key: name, tone: name, label: CLASS_LABELS[name], counts: t.byStatusClass[name] || new Array(n).fill(0) }));
+            const peakRate = Math.max.apply(null, totals) / bucket;
+            charts.requests.update({
+                from: t.from,
+                bucket: bucket,
+                series: classes.map((c) => ({ tone: c.tone, values: c.counts.map((count) => count / bucket) })),
+                empty: noRequests,
+                label: 'Requests per second by status over the last ' + span + ': peak ' + rateFormat.format(peakRate)
+                    + ', average ' + rateFormat.format(total / (n * bucket)) + '.',
+                tooltip: (i) => ({
+                    title: range(i),
+                    rows: classes.map((c) => ({ tone: c.tone, value: numberFormat.format(c.counts[i]), label: c.label })),
+                    foot: plural(totals[i], 'request') + ' · ' + rateFormat.format(totals[i] / bucket) + '/s',
+                }),
+            });
+            syncLegend(el.legendRequests, classes.map((c) => c.key).join(), () => classes.map((c) => legendItem(c.tone, c.label)));
+
+            // Bandwidth: response bytes per second.
+            const bytesSent = sum(t.bytes);
+            const peakBytes = Math.max.apply(null, t.bytes) / bucket;
+            charts.bandwidth.update({
+                from: t.from,
+                bucket: bucket,
+                series: [{ tone: 'accent', values: t.bytes.map((b) => b / bucket) }],
+                empty: noRequests,
+                label: 'Bandwidth over the last ' + span + ': ' + formatBytes(bytesSent) + ' sent, peak '
+                    + formatBytes(Math.round(peakBytes)) + ' per second.',
+                tooltip: (i) => ({
+                    title: range(i),
+                    rows: [{ tone: 'accent', value: formatBytes(Math.round(t.bytes[i] / bucket)) + '/s', label: 'sent' }],
+                    foot: formatBytes(t.bytes[i]) + ' in ' + formatWindow(bucket),
+                }),
+            });
+            el.footBandwidth.textContent = total
+                ? formatBytes(bytesSent) + ' sent in ' + span + ' · peak ' + formatBytes(Math.round(peakBytes)) + '/s'
+                : '';
+
+            // The busiest websites, one line each. A website filter brings its line forward.
+            const sites = t.byDomain || [];
+            const slots = assignSlots(sites.map((s) => s.domain));
+            const listed = sites.some((s) => s.domain === state.domain);
+            const lines = sites.map((s) => ({
+                domain: s.domain,
+                name: displayNames.get(s.domain) || s.domain,
+                tone: 's' + slots.get(s.domain),
+                counts: s.counts,
+                selected: s.domain === state.domain,
+            }));
+            charts.sites.update({
+                from: t.from,
+                bucket: bucket,
+                series: lines.map((l) => ({
+                    tone: l.tone,
+                    values: l.counts.map((count) => count / bucket),
+                    dim: listed && !l.selected,
+                    strong: l.selected,
+                })),
+                empty: lines.length ? '' : noRequests,
+                label: 'Requests per second of the busiest websites over the last ' + span + ': '
+                    + lines.map((l) => l.name).join(', ') + '.',
+                tooltip: (i) => ({
+                    title: range(i),
+                    rows: lines.map((l) => ({ tone: l.tone, value: numberFormat.format(l.counts[i]), label: l.name })),
+                    foot: 'requests in ' + formatWindow(bucket),
+                }),
+            });
+            syncRows(el.legendSites, legendRows, lines, 'domain', createSiteLegend, updateSiteLegend);
+
+            // Average response time; buckets where nothing was timed are gaps.
+            const timed = t.rt.filter((v) => typeof v === 'number');
+            charts.rt.update({
+                from: t.from,
+                bucket: bucket,
+                series: [{ tone: 'accent', values: t.rt }],
+                empty: timed.length ? ''
+                    : 'No response times in this window. Plesk\'s default log format doesn\'t record them.',
+                label: timed.length
+                    ? 'Average response time over the last ' + span + ', from ' + formatDuration(Math.min.apply(null, timed))
+                        + ' to ' + formatDuration(Math.max.apply(null, timed)) + '.'
+                    : 'No response times in this window.',
+                tooltip: (i) => ({
+                    title: range(i),
+                    rows: typeof t.rt[i] === 'number' ? [{ tone: 'accent', value: formatDuration(t.rt[i]), label: 'average' }] : [],
+                    foot: typeof t.rt[i] === 'number' ? '' : 'No timed requests',
+                }),
+            });
+            el.footRt.textContent = timed.length
+                ? 'Averages from ' + formatDuration(Math.min.apply(null, timed)) + ' to ' + formatDuration(Math.max.apply(null, timed))
+                : '';
+        }
+
+        // Colour slots 1..5 for the listed websites. A website keeps its slot while it stays listed, so a
+        // change in the ranking never repaints the others; a newcomer takes the lowest free slot.
+        function assignSlots(domains) {
+            const result = new Map();
+            const taken = new Set();
+            domains.forEach((domain) => {
+                const slot = siteSlots.get(domain);
+                if (slot && !taken.has(slot)) {
+                    taken.add(slot);
+                    result.set(domain, slot);
+                }
+            });
+            domains.forEach((domain) => {
+                if (result.has(domain)) {
+                    return;
+                }
+                let slot = 1;
+                while (taken.has(slot) && slot < SITE_SLOTS) {
+                    slot += 1;
+                }
+                taken.add(slot);
+                result.set(domain, slot);
+                siteSlots.forEach((owned, other) => {
+                    if (owned === slot) {
+                        siteSlots.delete(other);
+                    }
+                });
+                siteSlots.set(domain, slot);
+            });
+            return result;
+        }
+
+        function legendItem(tone, label) {
+            const li = h('li', 'ltm-legend-item');
+            li.append(h('span', 'ltm-swatch ltm-tone-' + tone), h('span', 'ltm-legend-label', label));
+            return li;
+        }
+
+        // Rebuilds a static legend only when its entries change.
+        function syncLegend(list, key, build) {
+            if (list.dataset.key !== key) {
+                list.dataset.key = key;
+                list.replaceChildren(...build());
+            }
+        }
+
+        // The website legend doubles as a filter, so its buttons are updated in place like the table rows.
+        function createSiteLegend(domain) {
+            const li = h('li', 'ltm-legend-item');
+            const button = h('button', 'ltm-link ltm-legend-button');
+            button.type = 'button';
+            button.dataset.domain = domain;
+            const swatch = h('span', 'ltm-swatch ltm-swatch--line');
+            const label = h('span', 'ltm-legend-label');
+            button.append(swatch, label);
+            li.appendChild(button);
+            return { tr: li, button: button, swatch: swatch, label: label };
+        }
+
+        function updateSiteLegend(row, line) {
+            row.swatch.className = 'ltm-swatch ltm-swatch--line ltm-tone-' + line.tone;
+            row.label.textContent = line.name;
+            row.button.title = line.selected ? 'Show all websites' : 'Show only ' + line.name;
+            row.button.setAttribute('aria-pressed', line.selected ? 'true' : 'false');
+        }
+
+        // Axis units: the factor ticks are divided by, and the suffix of their labels.
+        function rateUnits() {
+            return { factor: 1, suffix: '' };
+        }
+
+        function byteUnits(max) {
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0;
+            while (max >= Math.pow(1024, i + 1) && i < units.length - 1) {
+                i += 1;
+            }
+            return { factor: Math.pow(1024, i), suffix: ' ' + units[i] };
+        }
+
+        function durationUnits(max) {
+            return max >= 1 ? { factor: 1, suffix: ' s' } : { factor: 0.001, suffix: ' ms' };
+        }
+
+        // One SVG chart over a window's buckets. kind is 'stacked' (columns), 'area' (one series) or
+        // 'lines'. update() takes {from, bucket, series: [{tone, values, dim, strong}], empty, label, tooltip(i)}.
+        function createChart(host, kind, units) {
+            const HEIGHT = 180;
+            const PAD = { top: 12, right: 12, bottom: 26 };
+            const chart = { data: null, geo: null, hover: null, width: 0, update: update };
+
+            const svg = svgEl('svg', { class: 'ltm-chart-svg', 'aria-hidden': 'true', height: HEIGHT });
+            const band = svgEl('rect', { class: 'ltm-chart-band', display: 'none' });
+            const grid = svgEl('g', { class: 'ltm-chart-grid' });
+            const marks = svgEl('g');
+            const guide = svgEl('line', { class: 'ltm-chart-guide', display: 'none' });
+            const dots = svgEl('g');
+            const axis = svgEl('g', { class: 'ltm-chart-axis' });
+            svg.append(band, grid, marks, guide, dots, axis);
+            const empty = h('div', 'ltm-chart-empty');
+            empty.hidden = true;
+            const tip = h('div', 'ltm-tooltip');
+            tip.hidden = true;
+            host.append(svg, empty, tip);
+            host.tabIndex = 0;
+            host.setAttribute('role', 'img');
+
+            host.addEventListener('pointermove', (event) => {
+                const geo = chart.geo;
+                if (!geo) {
+                    return;
+                }
+                const x = event.clientX - svg.getBoundingClientRect().left;
+                const i = Math.floor((x - geo.left) / geo.slot);
+                setHover(i >= 0 && i < geo.n ? i : null);
+            });
+            host.addEventListener('pointerleave', () => setHover(null));
+            host.addEventListener('focus', () => {
+                if (chart.geo && host.matches(':focus-visible')) {
+                    setHover(chart.geo.n - 1);
+                }
+            });
+            host.addEventListener('blur', () => setHover(null));
+            host.addEventListener('keydown', (event) => {
+                const geo = chart.geo;
+                const moves = { ArrowLeft: -1, ArrowRight: 1 };
+                if (!geo || !(event.key in moves || event.key === 'Home' || event.key === 'End')) {
+                    return;
+                }
+                event.preventDefault();
+                const current = chart.hover === null ? geo.n - 1 : chart.hover;
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? geo.n - 1 : current + moves[event.key];
+                setHover(Math.max(0, Math.min(geo.n - 1, next)));
+            });
+            if (typeof ResizeObserver === 'function') {
+                new ResizeObserver(() => {
+                    if (host.clientWidth !== chart.width) {
+                        draw();
+                    }
+                }).observe(host);
+            } else {
+                window.addEventListener('resize', draw);
+            }
+            return chart;
+
+            function update(data) {
+                chart.data = data;
+                draw();
+            }
+
+            function setHover(i) {
+                if (i !== chart.hover) {
+                    chart.hover = i;
+                    drawHover();
+                }
+            }
+
+            function draw() {
+                const data = chart.data;
+                const width = host.clientWidth;
+                chart.width = width;
+                if (!data || !width) {
+                    return;
+                }
+                host.setAttribute('aria-label', data.label);
+                empty.textContent = data.empty;
+                empty.hidden = !data.empty;
+
+                const n = data.series.length ? data.series[0].values.length : 30;
+                let max = 0;
+                for (let i = 0; i < n; i++) {
+                    let stack = 0;
+                    data.series.forEach((s) => {
+                        const v = s.values[i];
+                        if (typeof v === 'number') {
+                            stack = kind === 'stacked' ? stack + v : Math.max(stack, v);
+                        }
+                    });
+                    max = Math.max(max, stack);
+                }
+                const scale = niceScale(max, units(max));
+                const left = Math.ceil(Math.max.apply(null, scale.labels.map(textWidth))) + 14;
+                const geo = {
+                    n: n,
+                    left: left,
+                    top: PAD.top,
+                    base: HEIGHT - PAD.bottom,
+                    plotW: Math.max(1, width - left - PAD.right),
+                    plotH: HEIGHT - PAD.top - PAD.bottom,
+                    max: scale.max,
+                };
+                geo.slot = geo.plotW / n;
+                geo.y = (v) => geo.base - (v / geo.max) * geo.plotH;
+                geo.x = (i) => geo.left + geo.slot * (i + 0.5);
+                chart.geo = geo;
+
+                svg.setAttribute('width', width);
+                svg.setAttribute('viewBox', '0 0 ' + width + ' ' + HEIGHT);
+                drawGrid(geo, scale, data);
+                marks.replaceChildren(...(kind === 'stacked' ? columns(geo, data.series) : lines(geo, data.series)));
+                drawHover();
+            }
+
+            function drawGrid(geo, scale, data) {
+                const nodes = [];
+                scale.ticks.forEach((value, k) => {
+                    const y = Math.round(geo.y(value)) + 0.5;
+                    nodes.push(svgEl('line', { class: k === 0 ? 'ltm-chart-base' : '', x1: geo.left, x2: geo.left + geo.plotW, y1: y, y2: y }));
+                });
+                grid.replaceChildren(...nodes);
+
+                // An empty chart keeps its frame but drops the y labels, whose scale would mean nothing.
+                const labels = data.empty ? []
+                    : scale.labels.map((label, k) => svgText(label, geo.left - 8, geo.y(scale.ticks[k]) + 4, 'end'));
+                const windowSec = geo.n * data.bucket;
+                xTicks(windowSec, geo.plotW).forEach((ago) => {
+                    const x = geo.left + geo.plotW * (windowSec - ago) / windowSec;
+                    const anchor = ago === windowSec ? 'start' : ago === 0 ? 'end' : 'middle';
+                    labels.push(svgText(ago === 0 ? 'now' : formatWindow(ago) + ' ago', x, geo.base + 18, anchor));
+                });
+                axis.replaceChildren(...labels);
+            }
+
+            function drawHover() {
+                const geo = chart.geo;
+                const i = chart.hover;
+                if (i === null || !geo || !chart.data || chart.data.empty) {
+                    band.setAttribute('display', 'none');
+                    guide.setAttribute('display', 'none');
+                    dots.replaceChildren();
+                    tip.hidden = true;
+                    return;
+                }
+                const x = geo.x(i);
+                if (kind === 'stacked') {
+                    setAttrs(band, { x: geo.left + geo.slot * i, y: geo.top, width: geo.slot, height: geo.plotH, display: 'inline' });
+                } else {
+                    setAttrs(guide, { x1: x, x2: x, y1: geo.top, y2: geo.base, display: 'inline' });
+                    dots.replaceChildren(...chart.data.series
+                        .filter((s) => typeof s.values[i] === 'number' && !s.dim)
+                        .map((s) => svgEl('circle', { class: 'ltm-chart-dot ltm-tone-' + s.tone, cx: x, cy: geo.y(s.values[i]), r: 4 })));
+                }
+                showTooltip(chart.data.tooltip(i), x, geo);
+            }
+
+            function showTooltip(content, x, geo) {
+                const rows = h('ul', 'ltm-tooltip-rows');
+                content.rows.forEach((row) => {
+                    const li = h('li');
+                    li.append(h('span', 'ltm-key ltm-tone-' + row.tone), h('strong', null, row.value), h('span', 'ltm-tooltip-label', row.label));
+                    rows.appendChild(li);
+                });
+                tip.replaceChildren(h('div', 'ltm-tooltip-title', content.title));
+                if (content.rows.length) {
+                    tip.appendChild(rows);
+                }
+                if (content.foot) {
+                    tip.appendChild(h('div', 'ltm-tooltip-foot', content.foot));
+                }
+                tip.hidden = false;
+                // Beside the hovered bucket, on whichever side has room.
+                const w = tip.offsetWidth;
+                let left = x + 14;
+                if (left + w > host.clientWidth - 4) {
+                    left = x - 14 - w;
+                }
+                tip.style.left = Math.max(4, left) + 'px';
+                tip.style.top = geo.top + 'px';
+            }
+        }
+
+        // Stacked columns: 4px rounded tops, a 2px gap between segments, and at least 3px for any
+        // non-zero segment so a single error stays visible.
+        function columns(geo, series) {
+            const GAP = 2;
+            const width = Math.max(2, Math.min(24, geo.slot * 0.68));
+            const nodes = [];
+            for (let i = 0; i < geo.n; i++) {
+                const x = geo.left + geo.slot * i + (geo.slot - width) / 2;
+                const segments = [];
+                series.forEach((s) => {
+                    if (s.values[i] > 0) {
+                        segments.push({ tone: s.tone, height: Math.max(3, s.values[i] / geo.max * geo.plotH) });
+                    }
+                });
+                let bottom = geo.base;
+                segments.forEach((seg, k) => {
+                    const top = bottom - seg.height;
+                    if (k === segments.length - 1) {
+                        nodes.push(svgEl('path', { class: 'ltm-col ltm-tone-' + seg.tone, d: roundedTop(x, top, width, seg.height, 4) }));
+                    } else {
+                        // The gap is the top of this segment, under the next one.
+                        const gap = Math.min(GAP, seg.height - 1);
+                        nodes.push(svgEl('path', { class: 'ltm-col ltm-tone-' + seg.tone, d: rectPath(x, top + gap, width, seg.height - gap) }));
+                    }
+                    bottom = top;
+                });
+            }
+            return nodes;
+        }
+
+        // Lines (2px) with gaps where a value is null; a lone point between gaps is drawn as a dot. A single
+        // series also gets a light area wash. Dimmed series are drawn first, the selected one last.
+        function lines(geo, series) {
+            const nodes = [];
+            const order = series.filter((s) => s.dim).concat(series.filter((s) => !s.dim && !s.strong), series.filter((s) => s.strong));
+            order.forEach((s) => {
+                const group = svgEl('g', { class: 'ltm-tone-' + s.tone + (s.dim ? ' is-dim' : '') + (s.strong ? ' is-strong' : '') });
+                let run = [];
+                const runs = [];
+                s.values.forEach((v, i) => {
+                    if (typeof v === 'number') {
+                        run.push([geo.x(i), geo.y(v)]);
+                    } else if (run.length) {
+                        runs.push(run);
+                        run = [];
+                    }
+                });
+                if (run.length) {
+                    runs.push(run);
+                }
+                runs.forEach((points) => {
+                    if (points.length === 1) {
+                        group.appendChild(svgEl('circle', { class: 'ltm-point', cx: points[0][0], cy: points[0][1], r: 2.5 }));
+                        return;
+                    }
+                    const d = 'M' + points.map((pt) => pt[0].toFixed(1) + ',' + pt[1].toFixed(1)).join('L');
+                    if (series.length === 1) {
+                        const close = 'L' + points[points.length - 1][0].toFixed(1) + ',' + geo.base + 'L' + points[0][0].toFixed(1) + ',' + geo.base + 'Z';
+                        group.appendChild(svgEl('path', { class: 'ltm-area', d: d + close }));
+                    }
+                    group.appendChild(svgEl('path', { class: 'ltm-line', d: d }));
+                });
+                nodes.push(group);
+            });
+            return nodes;
+        }
+
+        // A y scale with 3–4 round steps (1, 2, 2.5 or 5 × 10^n in the chosen unit), always at least one step.
+        function niceScale(max, unit) {
+            const top = max / unit.factor;
+            const raw = top > 0 ? top / 3 : 1 / 3;
+            const power = Math.pow(10, Math.floor(Math.log10(raw)));
+            const f = raw / power;
+            const step = (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * power;
+            const count = Math.max(1, Math.ceil(top / step - 1e-9));
+            const ticks = [];
+            const labels = [];
+            for (let k = 0; k <= count; k++) {
+                ticks.push(k * step * unit.factor);
+                labels.push(axisFormat.format(k * step) + unit.suffix);
+            }
+            return { max: count * step * unit.factor, ticks: ticks, labels: labels };
+        }
+
+        // Seconds-ago marks on the x axis, at least ~70px apart; the window's start and "now" always.
+        // Windows longer than a minute are marked in whole minutes ("4 min ago", never "270 s ago").
+        function xTicks(windowSec, plotW) {
+            const steps = windowSec > 60 ? [60, 120, 300] : [15, 30, 60];
+            let step = windowSec;
+            for (let k = 0; k < steps.length; k++) {
+                if (windowSec % steps[k] === 0 && plotW / (windowSec / steps[k]) >= 70) {
+                    step = steps[k];
+                    break;
+                }
+            }
+            const ticks = [];
+            for (let ago = windowSec; ago >= 0; ago -= step) {
+                ticks.push(ago);
+            }
+            return ticks;
+        }
+
+        function rectPath(x, y, w, hgt) {
+            return 'M' + x + ',' + y + 'h' + w + 'v' + hgt + 'h' + -w + 'Z';
+        }
+
+        function roundedTop(x, y, w, hgt, radius) {
+            const r = Math.min(radius, w / 2, hgt);
+            return 'M' + x + ',' + (y + hgt) + 'V' + (y + r) + 'Q' + x + ',' + y + ' ' + (x + r) + ',' + y
+                + 'H' + (x + w - r) + 'Q' + (x + w) + ',' + y + ' ' + (x + w) + ',' + (y + r) + 'V' + (y + hgt) + 'Z';
+        }
+
+        function svgEl(tag, attrs) {
+            return setAttrs(document.createElementNS(SVG_NS, tag), attrs || {});
+        }
+
+        function setAttrs(node, attrs) {
+            Object.keys(attrs).forEach((name) => {
+                if (attrs[name] !== '') {
+                    node.setAttribute(name, attrs[name]);
+                }
+            });
+            return node;
+        }
+
+        function svgText(text, x, y, anchor) {
+            const node = svgEl('text', { x: x, y: y, 'text-anchor': anchor });
+            node.textContent = text;
+            return node;
+        }
+
+        // Width of an axis label in the page's font, to size the y axis.
+        function textWidth(text) {
+            if (!textWidth.context) {
+                textWidth.context = document.createElement('canvas').getContext('2d');
+                textWidth.context.font = '11px ' + window.getComputedStyle(root).fontFamily;
+            }
+            return textWidth.context.measureText(text).width;
+        }
+
+        function sum(values) {
+            return values.reduce((total, v) => total + (typeof v === 'number' ? v : 0), 0);
         }
 
         // --- Helpers -------------------------------------------------------------------------------
