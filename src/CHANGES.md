@@ -1,3 +1,7 @@
+# 1.2.1-1
+
+- Removed the response-time chart, which stays empty with Plesk's default log format. The "Time taken" column only appears when the log format records response times.
+
 # 1.2.0-1
 
 - Charts of requests per second by status, bandwidth, the busiest websites and response time. The Docker containers panel is now collapsible and closed by default.
