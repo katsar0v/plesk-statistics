@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 – 2026-10-31
+
+- **Charts** above the breakdowns, across the selected time window: requests per second by status, bandwidth, the five busiest websites and the average response time. Hovering (or the arrow keys) shows each slice's numbers; the website legend sets the filter.
+- **Docker panel collapses.** It is closed by default and remembers whether you opened it. The closed header counts the containers and says when one is stopped, unhealthy or Docker can't be reached.
+- The data endpoint returns the window in 30 slices (`timeline`), counted from the same requests as the totals.
+
 ## 1.1.0 – 2026-10-29
 
 - **Docker containers.** Requests to websites behind a Docker proxy rule are tagged with the container that answered them. They were already counted through nginx's logs; now the dashboard says which container served them.
